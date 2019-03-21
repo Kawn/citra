@@ -53,6 +53,7 @@ public:
     bool AccelerateDisplay(const GPU::Regs::FramebufferConfig& config, PAddr framebuffer_addr,
                            u32 pixel_stride, ScreenInfo& screen_info) override;
     bool AccelerateDrawBatch(bool is_indexed) override;
+    void SetRenderHacks(const VideoCore::RenderHacksInput& input) override;
 
 private:
     struct SamplerInfo {
@@ -310,6 +311,8 @@ private:
     std::array<GLvec4, 256> proctex_diff_lut_data{};
 
     bool allow_shadow;
+
+    VideoCore::RenderHacksInput render_hacks;
 };
 
 } // namespace OpenGL

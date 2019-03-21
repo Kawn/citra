@@ -50,6 +50,8 @@ public:
     /// Shutdown the renderer
     void ShutDown() override;
 
+    void SetRenderHacks(const VideoCore::RenderHacksInput& matrix) override;
+
 private:
     void InitOpenGLObjects();
     void ConfigureFramebufferTexture(TextureInfo& texture,

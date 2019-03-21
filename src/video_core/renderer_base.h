@@ -8,6 +8,7 @@
 #include "common/common_types.h"
 #include "core/core.h"
 #include "video_core/rasterizer_interface.h"
+#include "video_core/video_core.h"
 
 class EmuWindow;
 
@@ -27,6 +28,8 @@ public:
 
     /// Shutdown the renderer
     virtual void ShutDown() = 0;
+
+    virtual void SetRenderHacks(const VideoCore::RenderHacksInput& input) = 0;
 
     /// Updates the framebuffer layout of the contained render window handle.
     void UpdateCurrentFramebufferLayout();

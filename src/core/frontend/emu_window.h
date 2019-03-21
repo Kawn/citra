@@ -9,6 +9,7 @@
 #include <utility>
 #include "common/common_types.h"
 #include "core/frontend/framebuffer_layout.h"
+#include "common/string_util.h"
 
 /**
  * Abstraction class used to provide an interface between emulation code and the frontend
@@ -100,6 +101,10 @@ public:
      */
     void UpdateCurrentFramebufferLayout(unsigned width, unsigned height);
 
+    void ToggleFog() {
+        fog_disabled = !fog_disabled;
+    }
+
 protected:
     EmuWindow();
     virtual ~EmuWindow();
@@ -138,6 +143,8 @@ protected:
         client_area_height = size.second;
     }
 
+    void UpdateCameraHack();
+
 private:
     /**
      * Handler called when the minimal client area was requested to be changed via SetConfig.
@@ -157,6 +164,32 @@ private:
     WindowConfig config;        ///< Internal configuration (changes pending for being applied in
                                 /// ProcessConfigurationChanges)
     WindowConfig active_config; ///< Internal active configuration
+
+    struct CameraHackState {
+        float tx = 0.0;
+        float ty = 0.0;
+        float lastX = 0.0;
+        float lastY = 0.0;
+        bool grabbed = false;
+    };
+    CameraHackState camera_hack_state;
+
+    struct FPSCameraController {
+        double worldMatrix[16];
+        double keyMovement[3];
+        double mouseMovement[2];
+
+        FPSCameraController() {
+            Common::mat4_identity(worldMatrix);
+            keyMovement[0] = 0.0;
+            keyMovement[1] = 0.0;
+            keyMovement[2] = 0.0;
+            mouseMovement[0] = 0.0;
+            mouseMovement[1] = 0.0;
+        }
+    };
+    FPSCameraController fps_camera_controller;
+    bool fog_disabled = false;
 
     class TouchState;
     std::shared_ptr<TouchState> touch_state;

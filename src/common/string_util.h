@@ -64,4 +64,11 @@ bool ComparePartialString(InIt begin, InIt end, const char* other) {
  */
 std::string StringFromFixedZeroTerminatedBuffer(const char* buffer, std::size_t max_len);
 
+typedef double* mat4_t;
+mat4_t mat4_inverse(mat4_t dest, mat4_t mat);
+mat4_t mat4_translate(mat4_t dest, mat4_t mat, double* v);
+mat4_t mat4_rotate(mat4_t dest, mat4_t mat, double angle, double *v);
+mat4_t mat4_multiply(mat4_t dest, mat4_t mat, mat4_t mat2);
+mat4_t mat4_identity(mat4_t dest);
+
 } // namespace Common

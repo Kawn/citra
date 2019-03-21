@@ -5,7 +5,9 @@
 #pragma once
 
 #include "common/common_types.h"
+#include "common/string_util.h"
 #include "core/hw/gpu.h"
+#include "video_core.h"
 
 namespace OpenGL {
 struct ScreenInfo;
@@ -70,6 +72,9 @@ public:
     /// Attempt to draw using hardware shaders
     virtual bool AccelerateDrawBatch(bool is_indexed) {
         return false;
+    }
+
+    virtual void SetRenderHacks(const VideoCore::RenderHacksInput& input) {
     }
 };
 } // namespace VideoCore

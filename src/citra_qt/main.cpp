@@ -446,6 +446,12 @@ void GMainWindow::InitializeHotkeys() {
                     OnCaptureScreenshot();
                 }
             });
+    connect(hotkey_registry.GetHotkey("Main Window", "Toggle Fog", render_window),
+            &QShortcut::activated, this, [&] {
+                if (emu_thread->IsRunning()) {
+                    render_window->ToggleFog();
+                }
+            });
 }
 
 void GMainWindow::ShowUpdaterWidgets() {

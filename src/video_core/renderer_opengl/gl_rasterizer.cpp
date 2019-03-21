@@ -1977,6 +1977,13 @@ void RasterizerOpenGL::SyncAndUploadLUTs() {
                            return GLvec2{entry.ToFloat(), entry.DiffToFloat()};
                        });
 
+        if (render_hacks.disable_fog) {
+            std::transform(Pica::g_state.fog.lut.begin(), Pica::g_state.fog.lut.end(),
+                           new_data.begin(), [](const auto& entry) {
+                               return GLvec2{1.0f, 0.0f};
+                           });
+        }
+
         if (new_data != fog_lut_data || invalidate) {
             fog_lut_data = new_data;
             std::memcpy(buffer + bytes_used, new_data.data(), new_data.size() * sizeof(GLvec2));
@@ -2097,6 +2104,39 @@ void RasterizerOpenGL::UploadUniforms(bool accelerate_draw, bool use_gs) {
     if (sync_vs) {
         VSUniformData vs_uniforms;
         vs_uniforms.uniforms.SetFromRegs(Pica::g_state.regs.vs, Pica::g_state.vs);
+
+        auto& f = vs_uniforms.uniforms.f;
+        const auto& m = render_hacks.view_matrix;
+
+#if 1
+        // OoT3D/MM3D Camera Hack
+        int viewMatrixStart = 4;
+        bool doCameraHack = vs_uniforms.uniforms.bools[1].b != 0 && f[0][3] != 1.0;
+#endif
+
+#if 0
+        // ALBW Camera Hack
+        int viewMatrixStart = 90;
+        bool doCameraHack = true;
+        auto& f = vs_uniforms.uniforms.f;
+#endif
+
+        if (doCameraHack) {
+            int r0 = viewMatrixStart, r1 = viewMatrixStart + 1, r2 = viewMatrixStart + 2;
+            f[r0][0] = m[0];
+            f[r0][1] = m[4];
+            f[r0][2] = m[8];
+            f[r0][3] = m[12];
+            f[r1][0] = m[1];
+            f[r1][1] = m[5];
+            f[r1][2] = m[9];
+            f[r1][3] = m[13];
+            f[r2][0] = m[2];
+            f[r2][1] = m[6];
+            f[r2][2] = m[10];
+            f[r2][3] = m[14];
+        }
+
         std::memcpy(uniforms + used_bytes, &vs_uniforms, sizeof(vs_uniforms));
         glBindBufferRange(GL_UNIFORM_BUFFER, static_cast<GLuint>(UniformBindings::VS),
                           uniform_buffer.GetHandle(), offset + used_bytes, sizeof(VSUniformData));
@@ -2121,6 +2161,10 @@ void RasterizerOpenGL::UploadUniforms(bool accelerate_draw, bool use_gs) {
     }
 
     uniform_buffer.Unmap(used_bytes);
+}
+
+void RasterizerOpenGL::SetRenderHacks(const VideoCore::RenderHacksInput& input) {
+    render_hacks = input;
 }
 
 } // namespace OpenGL

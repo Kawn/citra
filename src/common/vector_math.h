@@ -384,12 +384,24 @@ inline float Vec3<float>::Length() const {
 }
 
 template <>
+inline float Vec3<double>::Length() const {
+    return float(std::sqrt(x * x + y * y + z * z));
+}
+
+template <>
 inline Vec3<float> Vec3<float>::Normalized() const {
     return *this / Length();
 }
 
 template <>
 inline float Vec3<float>::Normalize() {
+    float length = Length();
+    *this /= length;
+    return length;
+}
+
+template <>
+inline float Vec3<double>::Normalize() {
     float length = Length();
     *this /= length;
     return length;

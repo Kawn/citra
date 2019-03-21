@@ -140,6 +140,8 @@ void GRenderWindow::SwapBuffers() {
     child->makeCurrent();
 
     child->swapBuffers();
+
+    UpdateCameraHack();
 }
 
 void GRenderWindow::MakeCurrent() {

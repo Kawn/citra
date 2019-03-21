@@ -574,4 +574,8 @@ Core::System::ResultStatus RendererOpenGL::Init() {
 /// Shutdown the renderer
 void RendererOpenGL::ShutDown() {}
 
+void RendererOpenGL::SetRenderHacks(const VideoCore::RenderHacksInput& input) {
+    rasterizer->SetRenderHacks(input);
+}
+
 } // namespace OpenGL

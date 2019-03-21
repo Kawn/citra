@@ -39,6 +39,15 @@ extern Layout::FramebufferLayout g_screenshot_framebuffer_layout;
 
 extern Memory::MemorySystem* g_memory;
 
+struct RenderHacksInput {
+    RenderHacksInput() {
+        Common::mat4_identity(view_matrix);
+    }
+
+    double view_matrix[16];
+    bool disable_fog = false;
+};
+
 /// Initialize the video core
 Core::System::ResultStatus Init(EmuWindow& emu_window, Memory::MemorySystem& memory);
 
