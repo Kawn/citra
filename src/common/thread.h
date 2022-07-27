@@ -4,19 +4,19 @@
 
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <mutex>
 #include <thread>
-#include "common/common_types.h"
 
 namespace Common {
 
 class Event {
 public:
     void Set() {
-        std::lock_guard<std::mutex> lk(mutex);
+        std::lock_guard lk{mutex};
         if (!is_set) {
             is_set = true;
             condvar.notify_one();
@@ -24,15 +24,15 @@ public:
     }
 
     void Wait() {
-        std::unique_lock<std::mutex> lk(mutex);
-        condvar.wait(lk, [&] { return is_set; });
+        std::unique_lock lk{mutex};
+        condvar.wait(lk, [&] { return is_set.load(); });
         is_set = false;
     }
 
     template <class Duration>
     bool WaitFor(const std::chrono::duration<Duration>& time) {
-        std::unique_lock<std::mutex> lk(mutex);
-        if (!condvar.wait_for(lk, time, [this] { return is_set; }))
+        std::unique_lock lk{mutex};
+        if (!condvar.wait_for(lk, time, [this] { return is_set.load(); }))
             return false;
         is_set = false;
         return true;
@@ -40,24 +40,24 @@ public:
 
     template <class Clock, class Duration>
     bool WaitUntil(const std::chrono::time_point<Clock, Duration>& time) {
-        std::unique_lock<std::mutex> lk(mutex);
-        if (!condvar.wait_until(lk, time, [this] { return is_set; }))
+        std::unique_lock lk{mutex};
+        if (!condvar.wait_until(lk, time, [this] { return is_set.load(); }))
             return false;
         is_set = false;
         return true;
     }
 
     void Reset() {
-        std::unique_lock<std::mutex> lk(mutex);
+        std::unique_lock lk{mutex};
         // no other action required, since wait loops on the predicate and any lingering signal will
         // get cleared on the first iteration
         is_set = false;
     }
 
 private:
-    bool is_set = false;
     std::condition_variable condvar;
     std::mutex mutex;
+    std::atomic_bool is_set{false};
 };
 
 class Barrier {
@@ -66,7 +66,7 @@ public:
 
     /// Blocks until all "count" threads have called Sync()
     void Sync() {
-        std::unique_lock<std::mutex> lk(mutex);
+        std::unique_lock lk{mutex};
         const std::size_t current_generation = generation;
 
         if (++waiting == count) {
@@ -80,7 +80,7 @@ public:
     }
 
     std::size_t Generation() const {
-        std::unique_lock<std::mutex> lk(mutex);
+        std::unique_lock lk(mutex);
         return generation;
     }
 
@@ -92,9 +92,6 @@ private:
     std::size_t generation = 0; // Incremented once each time the barrier is used
 };
 
-void SetThreadAffinity(std::thread::native_handle_type thread, u32 mask);
-void SetCurrentThreadAffinity(u32 mask);
-void SwitchCurrentThread(); // On Linux, this is equal to sleep 1ms
 void SetCurrentThreadName(const char* name);
 
 } // namespace Common

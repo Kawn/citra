@@ -15,9 +15,9 @@ namespace Frontend {
 
 ValidationError SoftwareKeyboard::ValidateFilters(const std::string& input) const {
     if (config.filters.prevent_digit) {
-        if (std::any_of(input.begin(), input.end(),
-                        [](unsigned char c) { return std::isdigit(c); })) {
-            return ValidationError::DigitNotAllowed;
+        if (std::count_if(input.begin(), input.end(),
+                          [](unsigned char c) { return std::isdigit(c); }) > config.max_digits) {
+            return ValidationError::MaxDigitsExceeded;
         }
     }
     if (config.filters.prevent_at) {
@@ -38,10 +38,6 @@ ValidationError SoftwareKeyboard::ValidateFilters(const std::string& input) cons
     if (config.filters.prevent_profanity) {
         // TODO: check the profanity filter
         LOG_INFO(Frontend, "App requested swkbd profanity filter, but its not implemented.");
-    }
-    if (config.filters.enable_callback) {
-        // TODO: check the callback
-        LOG_INFO(Frontend, "App requested a swkbd callback, but its not implemented.");
     }
     return ValidationError::None;
 }
@@ -91,7 +87,7 @@ ValidationError SoftwareKeyboard::ValidateInput(const std::string& input) const 
     default:
         // TODO(jroweboy): What does hardware do in this case?
         LOG_CRITICAL(Frontend, "Application requested unknown validation method. Method: {}",
-                     static_cast<u32>(config.accept_mode));
+                     config.accept_mode);
         UNREACHABLE();
     }
 
@@ -124,19 +120,32 @@ ValidationError SoftwareKeyboard::ValidateButton(u8 button) const {
 }
 
 ValidationError SoftwareKeyboard::Finalize(const std::string& text, u8 button) {
-    ValidationError error;
-    if ((error = ValidateInput(text)) != ValidationError::None) {
-        return error;
-    }
-    if ((error = ValidateButton(button)) != ValidationError::None) {
-        return error;
+    // Skip check when OK is not pressed
+    if (button == static_cast<u8>(config.button_config)) {
+        ValidationError error;
+        if ((error = ValidateInput(text)) != ValidationError::None) {
+            return error;
+        }
+        if ((error = ValidateButton(button)) != ValidationError::None) {
+            return error;
+        }
     }
     data = {text, button};
+    data_ready = true;
     return ValidationError::None;
 }
 
-void DefaultKeyboard::Setup(const Frontend::KeyboardConfig* config) {
-    SoftwareKeyboard::Setup(config);
+bool SoftwareKeyboard::DataReady() const {
+    return data_ready;
+}
+
+const KeyboardData& SoftwareKeyboard::ReceiveData() {
+    data_ready = false;
+    return data;
+}
+
+void DefaultKeyboard::Execute(const Frontend::KeyboardConfig& config) {
+    SoftwareKeyboard::Execute(config);
 
     auto cfg = Service::CFG::GetModule(Core::System::GetInstance());
     ASSERT_MSG(cfg, "CFG Module missing!");
@@ -157,12 +166,8 @@ void DefaultKeyboard::Setup(const Frontend::KeyboardConfig* config) {
     }
 }
 
-void RegisterSoftwareKeyboard(std::shared_ptr<SoftwareKeyboard> applet) {
-    Core::System::GetInstance().RegisterSoftwareKeyboard(applet);
-}
-
-std::shared_ptr<SoftwareKeyboard> GetRegisteredSoftwareKeyboard() {
-    return Core::System::GetInstance().GetSoftwareKeyboard();
+void DefaultKeyboard::ShowError(const std::string& error) {
+    LOG_ERROR(Applet_SWKBD, "Default keyboard text is unaccepted! error: {}", error);
 }
 
 } // namespace Frontend

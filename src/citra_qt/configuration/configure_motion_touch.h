@@ -7,11 +7,14 @@
 #include <memory>
 #include <QDialog>
 #include "common/param_package.h"
+#include "core/settings.h"
+#include "input_common/main.h"
 #include "input_common/udp/udp.h"
 
 class QVBoxLayout;
 class QLabel;
 class QPushButton;
+class QTimer;
 
 namespace Ui {
 class ConfigureMotionTouch;
@@ -49,24 +52,38 @@ public:
     ~ConfigureMotionTouch() override;
 
 public slots:
-    void applyConfiguration();
+    void ApplyConfiguration();
 
 private slots:
     void OnCemuhookUDPTest();
     void OnConfigureTouchCalibration();
+    void OnConfigureTouchFromButton();
 
 private:
     void closeEvent(QCloseEvent* event) override;
     Q_INVOKABLE void ShowUDPTestResult(bool result);
-    void setConfiguration();
-    void updateUiDisplay();
-    void connectEvents();
+    void SetConfiguration();
+    void UpdateUiDisplay();
+    void ConnectEvents();
+    void SetPollingResult(const Common::ParamPackage& params, bool abort);
     bool CanCloseDialog();
 
     std::unique_ptr<Ui::ConfigureMotionTouch> ui;
+
+    // Used for SDL input polling
+    std::string guid;
+    int port;
+    std::unique_ptr<QTimer> timeout_timer;
+    std::unique_ptr<QTimer> poll_timer;
+    std::vector<std::unique_ptr<InputCommon::Polling::DevicePoller>> device_pollers;
+
+    /// This will be the the setting function when an input is awaiting configuration.
+    std::optional<std::function<void(const Common::ParamPackage&)>> input_setter;
 
     // Coordinate system of the CemuhookUDP touch provider
     int min_x, min_y, max_x, max_y;
 
     bool udp_test_in_progress{};
+
+    std::vector<Settings::TouchFromButtonMap> touch_from_button_maps;
 };

@@ -6,7 +6,7 @@
 #include <QUrl>
 #include "citra_qt/configuration/configure_debug.h"
 #include "citra_qt/debugger/console.h"
-#include "citra_qt/ui_settings.h"
+#include "citra_qt/uisettings.h"
 #include "common/file_util.h"
 #include "common/logging/backend.h"
 #include "common/logging/filter.h"
@@ -15,10 +15,12 @@
 #include "core/settings.h"
 #include "ui_configure_debug.h"
 
-ConfigureDebug::ConfigureDebug(QWidget* parent) : QWidget(parent), ui(new Ui::ConfigureDebug) {
+ConfigureDebug::ConfigureDebug(QWidget* parent)
+    : QWidget(parent), ui(std::make_unique<Ui::ConfigureDebug>()) {
     ui->setupUi(this);
-    this->setConfiguration();
-    connect(ui->open_log_button, &QPushButton::pressed, []() {
+    SetConfiguration();
+
+    connect(ui->open_log_button, &QPushButton::clicked, []() {
         QString path = QString::fromStdString(FileUtil::GetUserPath(FileUtil::UserPath::LogDir));
         QDesktopServices::openUrl(QUrl::fromLocalFile(path));
     });
@@ -27,7 +29,7 @@ ConfigureDebug::ConfigureDebug(QWidget* parent) : QWidget(parent), ui(new Ui::Co
 
 ConfigureDebug::~ConfigureDebug() = default;
 
-void ConfigureDebug::setConfiguration() {
+void ConfigureDebug::SetConfiguration() {
     ui->toggle_gdbstub->setChecked(Settings::values.use_gdbstub);
     ui->gdbport_spinbox->setEnabled(Settings::values.use_gdbstub);
     ui->gdbport_spinbox->setValue(Settings::values.gdbstub_port);
@@ -37,7 +39,7 @@ void ConfigureDebug::setConfiguration() {
     ui->toggle_cpu_jit->setChecked(Settings::values.use_cpu_jit);
 }
 
-void ConfigureDebug::applyConfiguration() {
+void ConfigureDebug::ApplyConfiguration() {
     Settings::values.use_gdbstub = ui->toggle_gdbstub->isChecked();
     Settings::values.gdbstub_port = ui->gdbport_spinbox->value();
     UISettings::values.show_console = ui->toggle_console->isChecked();
@@ -49,6 +51,6 @@ void ConfigureDebug::applyConfiguration() {
     Settings::values.use_cpu_jit = ui->toggle_cpu_jit->isChecked();
 }
 
-void ConfigureDebug::retranslateUi() {
+void ConfigureDebug::RetranslateUI() {
     ui->retranslateUi(this);
 }

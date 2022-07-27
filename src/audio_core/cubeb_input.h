@@ -12,7 +12,7 @@ namespace AudioCore {
 
 class CubebInput final : public Frontend::Mic::Interface {
 public:
-    CubebInput();
+    explicit CubebInput(std::string device_id);
     ~CubebInput() override;
 
     void StartSampling(const Frontend::Mic::Parameters& params) override;
@@ -26,8 +26,16 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> impl;
+    std::string device_id;
 };
 
 std::vector<std::string> ListCubebInputDevices();
+
+class CubebFactory final : public Frontend::Mic::RealMicFactory {
+public:
+    ~CubebFactory() override;
+
+    std::unique_ptr<Frontend::Mic::Interface> Create(std::string mic_device_name) override;
+};
 
 } // namespace AudioCore

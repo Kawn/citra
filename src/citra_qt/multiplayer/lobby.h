@@ -11,9 +11,12 @@
 #include <QStandardItemModel>
 #include "citra_qt/multiplayer/validation.h"
 #include "common/announce_multiplayer_room.h"
-#include "core/announce_multiplayer_session.h"
+#include "network/announce_multiplayer_session.h"
 #include "network/network.h"
-#include "ui_lobby.h"
+
+namespace Ui {
+class Lobby;
+}
 
 class LobbyModel;
 class LobbyFilterProxyModel;
@@ -27,9 +30,14 @@ class Lobby : public QDialog {
 
 public:
     explicit Lobby(QWidget* parent, QStandardItemModel* list,
-                   std::shared_ptr<Core::AnnounceMultiplayerSession> session);
-    ~Lobby() = default;
+                   std::shared_ptr<Network::AnnounceMultiplayerSession> session);
+    ~Lobby() override;
 
+    /**
+     * Updates the lobby with a new game list model.
+     * This model should be the original model of the game list.
+     */
+    void UpdateGameList(QStandardItemModel* list);
     void RetranslateUi();
 
 public slots:
@@ -76,13 +84,14 @@ private:
      */
     QString PasswordPrompt();
 
-    QStandardItemModel* model;
-    QStandardItemModel* game_list;
-    LobbyFilterProxyModel* proxy;
+    std::unique_ptr<Ui::Lobby> ui;
+
+    QStandardItemModel* model{};
+    QStandardItemModel* game_list{};
+    LobbyFilterProxyModel* proxy{};
 
     QFutureWatcher<AnnounceMultiplayerRoom::RoomList> room_list_watcher;
-    std::weak_ptr<Core::AnnounceMultiplayerSession> announce_multiplayer_session;
-    std::unique_ptr<Ui::Lobby> ui;
+    std::weak_ptr<Network::AnnounceMultiplayerSession> announce_multiplayer_session;
     QFutureWatcher<void>* watcher;
     Validation validation;
 };
@@ -95,6 +104,13 @@ class LobbyFilterProxyModel : public QSortFilterProxyModel {
 
 public:
     explicit LobbyFilterProxyModel(QWidget* parent, QStandardItemModel* list);
+
+    /**
+     * Updates the filter with a new game list model.
+     * This model should be the processed one created by the Lobby.
+     */
+    void UpdateGameList(QStandardItemModel* list);
+
     bool filterAcceptsRow(int sourceRow, const QModelIndex& sourceParent) const override;
     void sort(int column, Qt::SortOrder order) override;
 

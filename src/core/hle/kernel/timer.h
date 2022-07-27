@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <boost/serialization/string.hpp>
+#include <boost/serialization/unordered_map.hpp>
 #include "common/common_types.h"
 #include "core/core_timing.h"
 #include "core/hle/kernel/object.h"
@@ -33,10 +35,20 @@ private:
 
     friend class Timer;
     friend class KernelSystem;
+
+    friend class boost::serialization::access;
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int file_version) {
+        ar& next_timer_callback_id;
+        ar& timer_callback_table;
+    }
 };
 
 class Timer final : public WaitObject {
 public:
+    explicit Timer(KernelSystem& kernel);
+    ~Timer() override;
+
     std::string GetTypeName() const override {
         return "Timer";
     }
@@ -44,7 +56,7 @@ public:
         return name;
     }
 
-    static const HandleType HANDLE_TYPE = HandleType::Timer;
+    static constexpr HandleType HANDLE_TYPE = HandleType::Timer;
     HandleType GetHandleType() const override {
         return HANDLE_TYPE;
     }
@@ -61,7 +73,7 @@ public:
         return interval_delay;
     }
 
-    bool ShouldWait(Thread* thread) const override;
+    bool ShouldWait(const Thread* thread) const override;
     void Acquire(Thread* thread) override;
 
     void WakeupAllWaitingThreads() override;
@@ -85,9 +97,6 @@ public:
     void Signal(s64 cycles_late);
 
 private:
-    explicit Timer(KernelSystem& kernel);
-    ~Timer() override;
-
     ResetType reset_type; ///< The ResetType of this timer
 
     u64 initial_delay;  ///< The delay until the timer fires for the first time
@@ -103,6 +112,21 @@ private:
     TimerManager& timer_manager;
 
     friend class KernelSystem;
+
+    friend class boost::serialization::access;
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int file_version) {
+        ar& boost::serialization::base_object<WaitObject>(*this);
+        ar& reset_type;
+        ar& initial_delay;
+        ar& interval_delay;
+        ar& signaled;
+        ar& name;
+        ar& callback_id;
+    }
 };
 
 } // namespace Kernel
+
+BOOST_CLASS_EXPORT_KEY(Kernel::Timer)
+CONSTRUCT_KERNEL_OBJECT(Kernel::Timer)

@@ -6,7 +6,9 @@
 
 #include <optional>
 #include <boost/icl/interval_set.hpp>
+#include <boost/serialization/set.hpp>
 #include "common/common_types.h"
+#include "common/serialization/boost_interval_set.hpp"
 
 namespace Kernel {
 
@@ -23,6 +25,10 @@ struct MemoryRegionInfo {
     using Interval = IntervalSet::interval_type;
 
     IntervalSet free_blocks;
+
+    // When locked, Free calls will be ignored, while Allocate calls will hit an assert. A memory
+    // region locks itself after deserialization.
+    bool is_locked{};
 
     /**
      * Reset the allocator state
@@ -60,6 +66,24 @@ struct MemoryRegionInfo {
      * @param size the size of the region to free.
      */
     void Free(u32 offset, u32 size);
+
+    /**
+     * Unlock the MemoryRegion. Used after loading is completed.
+     */
+    void Unlock();
+
+private:
+    friend class boost::serialization::access;
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int file_version) {
+        ar& base;
+        ar& size;
+        ar& used;
+        ar& free_blocks;
+        if (Archive::is_loading::value) {
+            is_locked = true;
+        }
+    }
 };
 
 } // namespace Kernel

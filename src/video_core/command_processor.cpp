@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstring>
 #include <memory>
 #include <utility>
 #include "common/assert.h"
@@ -30,17 +31,8 @@
 
 namespace Pica::CommandProcessor {
 
-static int vs_float_regs_counter = 0;
-static u32 vs_uniform_write_buffer[4];
-
-static int gs_float_regs_counter = 0;
-static u32 gs_uniform_write_buffer[4];
-
-static int default_attr_counter = 0;
-static u32 default_attr_write_buffer[3];
-
 // Expand a 4-bit mask to 4-byte mask, e.g. 0b0101 -> 0x00FF00FF
-static const u32 expand_bits_to_bytes[] = {
+constexpr std::array<u32, 16> expand_bits_to_bytes{
     0x00000000, 0x000000ff, 0x0000ff00, 0x0000ffff, 0x00ff0000, 0x00ff00ff, 0x00ffff00, 0x00ffffff,
     0xff000000, 0xff0000ff, 0xff00ff00, 0xff00ffff, 0xffff0000, 0xffff00ff, 0xffffff00, 0xffffffff,
 };
@@ -71,7 +63,8 @@ static void WriteUniformIntReg(Shader::ShaderSetup& setup, unsigned index,
 }
 
 static void WriteUniformFloatReg(ShaderRegs& config, Shader::ShaderSetup& setup,
-                                 int& float_regs_counter, u32 uniform_write_buffer[4], u32 value) {
+                                 int& float_regs_counter, std::array<u32, 4>& uniform_write_buffer,
+                                 u32 value) {
     auto& uniform_setup = config.uniform_setup;
 
     // TODO: Does actual hardware indeed keep an intermediate buffer or does
@@ -94,8 +87,11 @@ static void WriteUniformFloatReg(ShaderRegs& config, Shader::ShaderSetup& setup,
 
             // NOTE: The destination component order indeed is "backwards"
             if (uniform_setup.IsFloat32()) {
-                for (auto i : {0, 1, 2, 3})
-                    uniform[3 - i] = float24::FromFloat32(*(float*)(&uniform_write_buffer[i]));
+                for (auto i : {0, 1, 2, 3}) {
+                    float buffer_value;
+                    std::memcpy(&buffer_value, &uniform_write_buffer[i], sizeof(float));
+                    uniform[3 - i] = float24::FromFloat32(buffer_value);
+                }
             } else {
                 // TODO: Untested
                 uniform.w = float24::FromRaw(uniform_write_buffer[0] >> 8);
@@ -161,23 +157,23 @@ static void WritePicaReg(u32 id, u32 value, u32 mask) {
     case PICA_REG_INDEX(pipeline.vs_default_attributes_setup.index):
         g_state.immediate.current_attribute = 0;
         g_state.immediate.reset_geometry_pipeline = true;
-        default_attr_counter = 0;
+        g_state.default_attr_counter = 0;
         break;
 
     // Load default vertex input attributes
-    case PICA_REG_INDEX_WORKAROUND(pipeline.vs_default_attributes_setup.set_value[0], 0x233):
-    case PICA_REG_INDEX_WORKAROUND(pipeline.vs_default_attributes_setup.set_value[1], 0x234):
-    case PICA_REG_INDEX_WORKAROUND(pipeline.vs_default_attributes_setup.set_value[2], 0x235): {
+    case PICA_REG_INDEX(pipeline.vs_default_attributes_setup.set_value[0]):
+    case PICA_REG_INDEX(pipeline.vs_default_attributes_setup.set_value[1]):
+    case PICA_REG_INDEX(pipeline.vs_default_attributes_setup.set_value[2]): {
         // TODO: Does actual hardware indeed keep an intermediate buffer or does
         //       it directly write the values?
-        default_attr_write_buffer[default_attr_counter++] = value;
+        g_state.default_attr_write_buffer[g_state.default_attr_counter++] = value;
 
         // Default attributes are written in a packed format such that four float24 values are
         // encoded in
         // three 32-bit numbers. We write to internal memory once a full such vector is
         // written.
-        if (default_attr_counter >= 3) {
-            default_attr_counter = 0;
+        if (g_state.default_attr_counter >= 3) {
+            g_state.default_attr_counter = 0;
 
             auto& setup = regs.pipeline.vs_default_attributes_setup;
 
@@ -189,12 +185,12 @@ static void WritePicaReg(u32 id, u32 value, u32 mask) {
             Common::Vec4<float24> attribute;
 
             // NOTE: The destination component order indeed is "backwards"
-            attribute.w = float24::FromRaw(default_attr_write_buffer[0] >> 8);
-            attribute.z = float24::FromRaw(((default_attr_write_buffer[0] & 0xFF) << 16) |
-                                           ((default_attr_write_buffer[1] >> 16) & 0xFFFF));
-            attribute.y = float24::FromRaw(((default_attr_write_buffer[1] & 0xFFFF) << 8) |
-                                           ((default_attr_write_buffer[2] >> 24) & 0xFF));
-            attribute.x = float24::FromRaw(default_attr_write_buffer[2] & 0xFFFFFF);
+            attribute.w = float24::FromRaw(g_state.default_attr_write_buffer[0] >> 8);
+            attribute.z = float24::FromRaw(((g_state.default_attr_write_buffer[0] & 0xFF) << 16) |
+                                           ((g_state.default_attr_write_buffer[1] >> 16) & 0xFFFF));
+            attribute.y = float24::FromRaw(((g_state.default_attr_write_buffer[1] & 0xFFFF) << 8) |
+                                           ((g_state.default_attr_write_buffer[2] >> 24) & 0xFF));
+            attribute.x = float24::FromRaw(g_state.default_attr_write_buffer[2] & 0xFFFFFF);
 
             LOG_TRACE(HW_GPU, "Set default VS attribute {:x} to ({} {} {} {})", (int)setup.index,
                       attribute.x.ToFloat32(), attribute.y.ToFloat32(), attribute.z.ToFloat32(),
@@ -263,8 +259,8 @@ static void WritePicaReg(u32 id, u32 value, u32 mask) {
         // This register likely just enables vertex processing and doesn't need any special handling
         break;
 
-    case PICA_REG_INDEX_WORKAROUND(pipeline.command_buffer.trigger[0], 0x23c):
-    case PICA_REG_INDEX_WORKAROUND(pipeline.command_buffer.trigger[1], 0x23d): {
+    case PICA_REG_INDEX(pipeline.command_buffer.trigger[0]):
+    case PICA_REG_INDEX(pipeline.command_buffer.trigger[1]): {
         unsigned index =
             static_cast<unsigned>(id - PICA_REG_INDEX(pipeline.command_buffer.trigger[0]));
         u32* head_ptr = (u32*)VideoCore::g_memory->GetPhysicalPointer(
@@ -302,9 +298,7 @@ static void WritePicaReg(u32 id, u32 value, u32 mask) {
             // this, so this is left unimplemented for now. Revisit this when an issue is found in
             // games.
         } else {
-            if (VideoCore::g_hw_shader_accurate_gs) {
-                accelerate_draw = false;
-            }
+            accelerate_draw = false;
         }
 
         bool is_indexed = (id == PICA_REG_INDEX(pipeline.trigger_draw_indexed));
@@ -440,38 +434,38 @@ static void WritePicaReg(u32 id, u32 value, u32 mask) {
         WriteUniformBoolReg(g_state.gs, g_state.regs.gs.bool_uniforms.Value());
         break;
 
-    case PICA_REG_INDEX_WORKAROUND(gs.int_uniforms[0], 0x281):
-    case PICA_REG_INDEX_WORKAROUND(gs.int_uniforms[1], 0x282):
-    case PICA_REG_INDEX_WORKAROUND(gs.int_uniforms[2], 0x283):
-    case PICA_REG_INDEX_WORKAROUND(gs.int_uniforms[3], 0x284): {
-        unsigned index = (id - PICA_REG_INDEX_WORKAROUND(gs.int_uniforms[0], 0x281));
+    case PICA_REG_INDEX(gs.int_uniforms[0]):
+    case PICA_REG_INDEX(gs.int_uniforms[1]):
+    case PICA_REG_INDEX(gs.int_uniforms[2]):
+    case PICA_REG_INDEX(gs.int_uniforms[3]): {
+        unsigned index = (id - PICA_REG_INDEX(gs.int_uniforms[0]));
         auto values = regs.gs.int_uniforms[index];
         WriteUniformIntReg(g_state.gs, index,
                            Common::Vec4<u8>(values.x, values.y, values.z, values.w));
         break;
     }
 
-    case PICA_REG_INDEX_WORKAROUND(gs.uniform_setup.set_value[0], 0x291):
-    case PICA_REG_INDEX_WORKAROUND(gs.uniform_setup.set_value[1], 0x292):
-    case PICA_REG_INDEX_WORKAROUND(gs.uniform_setup.set_value[2], 0x293):
-    case PICA_REG_INDEX_WORKAROUND(gs.uniform_setup.set_value[3], 0x294):
-    case PICA_REG_INDEX_WORKAROUND(gs.uniform_setup.set_value[4], 0x295):
-    case PICA_REG_INDEX_WORKAROUND(gs.uniform_setup.set_value[5], 0x296):
-    case PICA_REG_INDEX_WORKAROUND(gs.uniform_setup.set_value[6], 0x297):
-    case PICA_REG_INDEX_WORKAROUND(gs.uniform_setup.set_value[7], 0x298): {
-        WriteUniformFloatReg(g_state.regs.gs, g_state.gs, gs_float_regs_counter,
-                             gs_uniform_write_buffer, value);
+    case PICA_REG_INDEX(gs.uniform_setup.set_value[0]):
+    case PICA_REG_INDEX(gs.uniform_setup.set_value[1]):
+    case PICA_REG_INDEX(gs.uniform_setup.set_value[2]):
+    case PICA_REG_INDEX(gs.uniform_setup.set_value[3]):
+    case PICA_REG_INDEX(gs.uniform_setup.set_value[4]):
+    case PICA_REG_INDEX(gs.uniform_setup.set_value[5]):
+    case PICA_REG_INDEX(gs.uniform_setup.set_value[6]):
+    case PICA_REG_INDEX(gs.uniform_setup.set_value[7]): {
+        WriteUniformFloatReg(g_state.regs.gs, g_state.gs, g_state.gs_float_regs_counter,
+                             g_state.gs_uniform_write_buffer, value);
         break;
     }
 
-    case PICA_REG_INDEX_WORKAROUND(gs.program.set_word[0], 0x29c):
-    case PICA_REG_INDEX_WORKAROUND(gs.program.set_word[1], 0x29d):
-    case PICA_REG_INDEX_WORKAROUND(gs.program.set_word[2], 0x29e):
-    case PICA_REG_INDEX_WORKAROUND(gs.program.set_word[3], 0x29f):
-    case PICA_REG_INDEX_WORKAROUND(gs.program.set_word[4], 0x2a0):
-    case PICA_REG_INDEX_WORKAROUND(gs.program.set_word[5], 0x2a1):
-    case PICA_REG_INDEX_WORKAROUND(gs.program.set_word[6], 0x2a2):
-    case PICA_REG_INDEX_WORKAROUND(gs.program.set_word[7], 0x2a3): {
+    case PICA_REG_INDEX(gs.program.set_word[0]):
+    case PICA_REG_INDEX(gs.program.set_word[1]):
+    case PICA_REG_INDEX(gs.program.set_word[2]):
+    case PICA_REG_INDEX(gs.program.set_word[3]):
+    case PICA_REG_INDEX(gs.program.set_word[4]):
+    case PICA_REG_INDEX(gs.program.set_word[5]):
+    case PICA_REG_INDEX(gs.program.set_word[6]):
+    case PICA_REG_INDEX(gs.program.set_word[7]): {
         u32& offset = g_state.regs.gs.program.offset;
         if (offset >= 4096) {
             LOG_ERROR(HW_GPU, "Invalid GS program offset {}", offset);
@@ -483,14 +477,14 @@ static void WritePicaReg(u32 id, u32 value, u32 mask) {
         break;
     }
 
-    case PICA_REG_INDEX_WORKAROUND(gs.swizzle_patterns.set_word[0], 0x2a6):
-    case PICA_REG_INDEX_WORKAROUND(gs.swizzle_patterns.set_word[1], 0x2a7):
-    case PICA_REG_INDEX_WORKAROUND(gs.swizzle_patterns.set_word[2], 0x2a8):
-    case PICA_REG_INDEX_WORKAROUND(gs.swizzle_patterns.set_word[3], 0x2a9):
-    case PICA_REG_INDEX_WORKAROUND(gs.swizzle_patterns.set_word[4], 0x2aa):
-    case PICA_REG_INDEX_WORKAROUND(gs.swizzle_patterns.set_word[5], 0x2ab):
-    case PICA_REG_INDEX_WORKAROUND(gs.swizzle_patterns.set_word[6], 0x2ac):
-    case PICA_REG_INDEX_WORKAROUND(gs.swizzle_patterns.set_word[7], 0x2ad): {
+    case PICA_REG_INDEX(gs.swizzle_patterns.set_word[0]):
+    case PICA_REG_INDEX(gs.swizzle_patterns.set_word[1]):
+    case PICA_REG_INDEX(gs.swizzle_patterns.set_word[2]):
+    case PICA_REG_INDEX(gs.swizzle_patterns.set_word[3]):
+    case PICA_REG_INDEX(gs.swizzle_patterns.set_word[4]):
+    case PICA_REG_INDEX(gs.swizzle_patterns.set_word[5]):
+    case PICA_REG_INDEX(gs.swizzle_patterns.set_word[6]):
+    case PICA_REG_INDEX(gs.swizzle_patterns.set_word[7]): {
         u32& offset = g_state.regs.gs.swizzle_patterns.offset;
         if (offset >= g_state.gs.swizzle_data.size()) {
             LOG_ERROR(HW_GPU, "Invalid GS swizzle pattern offset {}", offset);
@@ -507,40 +501,40 @@ static void WritePicaReg(u32 id, u32 value, u32 mask) {
         WriteUniformBoolReg(g_state.vs, g_state.regs.vs.bool_uniforms.Value());
         break;
 
-    case PICA_REG_INDEX_WORKAROUND(vs.int_uniforms[0], 0x2b1):
-    case PICA_REG_INDEX_WORKAROUND(vs.int_uniforms[1], 0x2b2):
-    case PICA_REG_INDEX_WORKAROUND(vs.int_uniforms[2], 0x2b3):
-    case PICA_REG_INDEX_WORKAROUND(vs.int_uniforms[3], 0x2b4): {
+    case PICA_REG_INDEX(vs.int_uniforms[0]):
+    case PICA_REG_INDEX(vs.int_uniforms[1]):
+    case PICA_REG_INDEX(vs.int_uniforms[2]):
+    case PICA_REG_INDEX(vs.int_uniforms[3]): {
         // TODO (wwylele): does regs.pipeline.gs_unit_exclusive_configuration affect this?
-        unsigned index = (id - PICA_REG_INDEX_WORKAROUND(vs.int_uniforms[0], 0x2b1));
+        unsigned index = (id - PICA_REG_INDEX(vs.int_uniforms[0]));
         auto values = regs.vs.int_uniforms[index];
         WriteUniformIntReg(g_state.vs, index,
                            Common::Vec4<u8>(values.x, values.y, values.z, values.w));
         break;
     }
 
-    case PICA_REG_INDEX_WORKAROUND(vs.uniform_setup.set_value[0], 0x2c1):
-    case PICA_REG_INDEX_WORKAROUND(vs.uniform_setup.set_value[1], 0x2c2):
-    case PICA_REG_INDEX_WORKAROUND(vs.uniform_setup.set_value[2], 0x2c3):
-    case PICA_REG_INDEX_WORKAROUND(vs.uniform_setup.set_value[3], 0x2c4):
-    case PICA_REG_INDEX_WORKAROUND(vs.uniform_setup.set_value[4], 0x2c5):
-    case PICA_REG_INDEX_WORKAROUND(vs.uniform_setup.set_value[5], 0x2c6):
-    case PICA_REG_INDEX_WORKAROUND(vs.uniform_setup.set_value[6], 0x2c7):
-    case PICA_REG_INDEX_WORKAROUND(vs.uniform_setup.set_value[7], 0x2c8): {
+    case PICA_REG_INDEX(vs.uniform_setup.set_value[0]):
+    case PICA_REG_INDEX(vs.uniform_setup.set_value[1]):
+    case PICA_REG_INDEX(vs.uniform_setup.set_value[2]):
+    case PICA_REG_INDEX(vs.uniform_setup.set_value[3]):
+    case PICA_REG_INDEX(vs.uniform_setup.set_value[4]):
+    case PICA_REG_INDEX(vs.uniform_setup.set_value[5]):
+    case PICA_REG_INDEX(vs.uniform_setup.set_value[6]):
+    case PICA_REG_INDEX(vs.uniform_setup.set_value[7]): {
         // TODO (wwylele): does regs.pipeline.gs_unit_exclusive_configuration affect this?
-        WriteUniformFloatReg(g_state.regs.vs, g_state.vs, vs_float_regs_counter,
-                             vs_uniform_write_buffer, value);
+        WriteUniformFloatReg(g_state.regs.vs, g_state.vs, g_state.vs_float_regs_counter,
+                             g_state.vs_uniform_write_buffer, value);
         break;
     }
 
-    case PICA_REG_INDEX_WORKAROUND(vs.program.set_word[0], 0x2cc):
-    case PICA_REG_INDEX_WORKAROUND(vs.program.set_word[1], 0x2cd):
-    case PICA_REG_INDEX_WORKAROUND(vs.program.set_word[2], 0x2ce):
-    case PICA_REG_INDEX_WORKAROUND(vs.program.set_word[3], 0x2cf):
-    case PICA_REG_INDEX_WORKAROUND(vs.program.set_word[4], 0x2d0):
-    case PICA_REG_INDEX_WORKAROUND(vs.program.set_word[5], 0x2d1):
-    case PICA_REG_INDEX_WORKAROUND(vs.program.set_word[6], 0x2d2):
-    case PICA_REG_INDEX_WORKAROUND(vs.program.set_word[7], 0x2d3): {
+    case PICA_REG_INDEX(vs.program.set_word[0]):
+    case PICA_REG_INDEX(vs.program.set_word[1]):
+    case PICA_REG_INDEX(vs.program.set_word[2]):
+    case PICA_REG_INDEX(vs.program.set_word[3]):
+    case PICA_REG_INDEX(vs.program.set_word[4]):
+    case PICA_REG_INDEX(vs.program.set_word[5]):
+    case PICA_REG_INDEX(vs.program.set_word[6]):
+    case PICA_REG_INDEX(vs.program.set_word[7]): {
         u32& offset = g_state.regs.vs.program.offset;
         if (offset >= 512) {
             LOG_ERROR(HW_GPU, "Invalid VS program offset {}", offset);
@@ -556,14 +550,14 @@ static void WritePicaReg(u32 id, u32 value, u32 mask) {
         break;
     }
 
-    case PICA_REG_INDEX_WORKAROUND(vs.swizzle_patterns.set_word[0], 0x2d6):
-    case PICA_REG_INDEX_WORKAROUND(vs.swizzle_patterns.set_word[1], 0x2d7):
-    case PICA_REG_INDEX_WORKAROUND(vs.swizzle_patterns.set_word[2], 0x2d8):
-    case PICA_REG_INDEX_WORKAROUND(vs.swizzle_patterns.set_word[3], 0x2d9):
-    case PICA_REG_INDEX_WORKAROUND(vs.swizzle_patterns.set_word[4], 0x2da):
-    case PICA_REG_INDEX_WORKAROUND(vs.swizzle_patterns.set_word[5], 0x2db):
-    case PICA_REG_INDEX_WORKAROUND(vs.swizzle_patterns.set_word[6], 0x2dc):
-    case PICA_REG_INDEX_WORKAROUND(vs.swizzle_patterns.set_word[7], 0x2dd): {
+    case PICA_REG_INDEX(vs.swizzle_patterns.set_word[0]):
+    case PICA_REG_INDEX(vs.swizzle_patterns.set_word[1]):
+    case PICA_REG_INDEX(vs.swizzle_patterns.set_word[2]):
+    case PICA_REG_INDEX(vs.swizzle_patterns.set_word[3]):
+    case PICA_REG_INDEX(vs.swizzle_patterns.set_word[4]):
+    case PICA_REG_INDEX(vs.swizzle_patterns.set_word[5]):
+    case PICA_REG_INDEX(vs.swizzle_patterns.set_word[6]):
+    case PICA_REG_INDEX(vs.swizzle_patterns.set_word[7]): {
         u32& offset = g_state.regs.vs.swizzle_patterns.offset;
         if (offset >= g_state.vs.swizzle_data.size()) {
             LOG_ERROR(HW_GPU, "Invalid VS swizzle pattern offset {}", offset);
@@ -579,14 +573,14 @@ static void WritePicaReg(u32 id, u32 value, u32 mask) {
         break;
     }
 
-    case PICA_REG_INDEX_WORKAROUND(lighting.lut_data[0], 0x1c8):
-    case PICA_REG_INDEX_WORKAROUND(lighting.lut_data[1], 0x1c9):
-    case PICA_REG_INDEX_WORKAROUND(lighting.lut_data[2], 0x1ca):
-    case PICA_REG_INDEX_WORKAROUND(lighting.lut_data[3], 0x1cb):
-    case PICA_REG_INDEX_WORKAROUND(lighting.lut_data[4], 0x1cc):
-    case PICA_REG_INDEX_WORKAROUND(lighting.lut_data[5], 0x1cd):
-    case PICA_REG_INDEX_WORKAROUND(lighting.lut_data[6], 0x1ce):
-    case PICA_REG_INDEX_WORKAROUND(lighting.lut_data[7], 0x1cf): {
+    case PICA_REG_INDEX(lighting.lut_data[0]):
+    case PICA_REG_INDEX(lighting.lut_data[1]):
+    case PICA_REG_INDEX(lighting.lut_data[2]):
+    case PICA_REG_INDEX(lighting.lut_data[3]):
+    case PICA_REG_INDEX(lighting.lut_data[4]):
+    case PICA_REG_INDEX(lighting.lut_data[5]):
+    case PICA_REG_INDEX(lighting.lut_data[6]):
+    case PICA_REG_INDEX(lighting.lut_data[7]): {
         auto& lut_config = regs.lighting.lut_config;
 
         ASSERT_MSG(lut_config.index < 256, "lut_config.index exceeded maximum value of 255!");
@@ -596,27 +590,27 @@ static void WritePicaReg(u32 id, u32 value, u32 mask) {
         break;
     }
 
-    case PICA_REG_INDEX_WORKAROUND(texturing.fog_lut_data[0], 0xe8):
-    case PICA_REG_INDEX_WORKAROUND(texturing.fog_lut_data[1], 0xe9):
-    case PICA_REG_INDEX_WORKAROUND(texturing.fog_lut_data[2], 0xea):
-    case PICA_REG_INDEX_WORKAROUND(texturing.fog_lut_data[3], 0xeb):
-    case PICA_REG_INDEX_WORKAROUND(texturing.fog_lut_data[4], 0xec):
-    case PICA_REG_INDEX_WORKAROUND(texturing.fog_lut_data[5], 0xed):
-    case PICA_REG_INDEX_WORKAROUND(texturing.fog_lut_data[6], 0xee):
-    case PICA_REG_INDEX_WORKAROUND(texturing.fog_lut_data[7], 0xef): {
+    case PICA_REG_INDEX(texturing.fog_lut_data[0]):
+    case PICA_REG_INDEX(texturing.fog_lut_data[1]):
+    case PICA_REG_INDEX(texturing.fog_lut_data[2]):
+    case PICA_REG_INDEX(texturing.fog_lut_data[3]):
+    case PICA_REG_INDEX(texturing.fog_lut_data[4]):
+    case PICA_REG_INDEX(texturing.fog_lut_data[5]):
+    case PICA_REG_INDEX(texturing.fog_lut_data[6]):
+    case PICA_REG_INDEX(texturing.fog_lut_data[7]): {
         g_state.fog.lut[regs.texturing.fog_lut_offset % 128].raw = value;
         regs.texturing.fog_lut_offset.Assign(regs.texturing.fog_lut_offset + 1);
         break;
     }
 
-    case PICA_REG_INDEX_WORKAROUND(texturing.proctex_lut_data[0], 0xb0):
-    case PICA_REG_INDEX_WORKAROUND(texturing.proctex_lut_data[1], 0xb1):
-    case PICA_REG_INDEX_WORKAROUND(texturing.proctex_lut_data[2], 0xb2):
-    case PICA_REG_INDEX_WORKAROUND(texturing.proctex_lut_data[3], 0xb3):
-    case PICA_REG_INDEX_WORKAROUND(texturing.proctex_lut_data[4], 0xb4):
-    case PICA_REG_INDEX_WORKAROUND(texturing.proctex_lut_data[5], 0xb5):
-    case PICA_REG_INDEX_WORKAROUND(texturing.proctex_lut_data[6], 0xb6):
-    case PICA_REG_INDEX_WORKAROUND(texturing.proctex_lut_data[7], 0xb7): {
+    case PICA_REG_INDEX(texturing.proctex_lut_data[0]):
+    case PICA_REG_INDEX(texturing.proctex_lut_data[1]):
+    case PICA_REG_INDEX(texturing.proctex_lut_data[2]):
+    case PICA_REG_INDEX(texturing.proctex_lut_data[3]):
+    case PICA_REG_INDEX(texturing.proctex_lut_data[4]):
+    case PICA_REG_INDEX(texturing.proctex_lut_data[5]):
+    case PICA_REG_INDEX(texturing.proctex_lut_data[6]):
+    case PICA_REG_INDEX(texturing.proctex_lut_data[7]): {
         auto& index = regs.texturing.proctex_lut_config.index;
         auto& pt = g_state.proctex;
 
@@ -651,8 +645,16 @@ static void WritePicaReg(u32 id, u32 value, u32 mask) {
                                  reinterpret_cast<void*>(&id));
 }
 
-void ProcessCommandList(const u32* list, u32 size) {
-    g_state.cmd_list.head_ptr = g_state.cmd_list.current_ptr = list;
+void ProcessCommandList(PAddr list, u32 size) {
+
+    u32* buffer = (u32*)VideoCore::g_memory->GetPhysicalPointer(list);
+
+    if (Pica::g_debug_context && Pica::g_debug_context->recorder) {
+        Pica::g_debug_context->recorder->MemoryAccessed((u8*)buffer, size, list);
+    }
+
+    g_state.cmd_list.addr = list;
+    g_state.cmd_list.head_ptr = g_state.cmd_list.current_ptr = buffer;
     g_state.cmd_list.length = size / sizeof(u32);
 
     while (g_state.cmd_list.current_ptr < g_state.cmd_list.head_ptr + g_state.cmd_list.length) {

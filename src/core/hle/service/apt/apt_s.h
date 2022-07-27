@@ -15,9 +15,15 @@ namespace Service::APT {
 // svcBreak when the command isn't accessible). See http://3dbrew.org/wiki/NS#APT_Services.
 
 /// Interface to "APT:S" service
-class APT_S final : public Module::Interface {
+class APT_S final : public Module::APTInterface {
 public:
     explicit APT_S(std::shared_ptr<Module> apt);
+
+private:
+    SERVICE_SERIALIZATION(APT_S, apt, Module)
 };
 
 } // namespace Service::APT
+
+BOOST_CLASS_EXPORT_KEY(Service::APT::APT_S)
+BOOST_SERIALIZATION_CONSTRUCT(Service::APT::APT_S)

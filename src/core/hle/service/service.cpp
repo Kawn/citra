@@ -40,7 +40,6 @@
 #include "core/hle/service/news/news.h"
 #include "core/hle/service/nfc/nfc.h"
 #include "core/hle/service/nim/nim.h"
-#include "core/hle/service/ns/ns.h"
 #include "core/hle/service/nwm/nwm.h"
 #include "core/hle/service/pm/pm.h"
 #include "core/hle/service/ps/ps_ps.h"
@@ -86,11 +85,7 @@ const std::array<ServiceModuleInfo, 40> service_module_map{
      {"NEWS", 0x00040130'00003502, NEWS::InstallInterfaces},
      {"NFC", 0x00040130'00004002, NFC::InstallInterfaces},
      {"NIM", 0x00040130'00002C02, NIM::InstallInterfaces},
-     {"NS", 0x00040130'00008002,
-      [](Core::System& system) {
-          NS::InstallInterfaces(system);
-          APT::InstallInterfaces(system);
-      }},
+     {"NS", 0x00040130'00008002, APT::InstallInterfaces},
      {"NWM", 0x00040130'00002D02, NWM::InstallInterfaces},
      {"PTM", 0x00040130'00002202, PTM::InstallInterfaces},
      {"QTM", 0x00040130'00004202, QTM::InstallInterfaces},
@@ -98,6 +93,7 @@ const std::array<ServiceModuleInfo, 40> service_module_map{
      {"HTTP", 0x00040130'00002902, HTTP::InstallInterfaces},
      {"SOC", 0x00040130'00002E02, SOC::InstallInterfaces},
      {"SSL", 0x00040130'00002F02, SSL::InstallInterfaces},
+     {"PS", 0x00040130'00003102, PS::InstallInterfaces},
      // no HLE implementation
      {"CDC", 0x00040130'00001802, nullptr},
      {"GPIO", 0x00040130'00001B02, nullptr},
@@ -105,14 +101,14 @@ const std::array<ServiceModuleInfo, 40> service_module_map{
      {"MCU", 0x00040130'00001F02, nullptr},
      {"MP", 0x00040130'00002A02, nullptr},
      {"PDN", 0x00040130'00002102, nullptr},
-     {"PS", 0x00040130'00003102, nullptr},
      {"SPI", 0x00040130'00002302, nullptr}}};
 
 /**
  * Creates a function string for logging, complete with the name (or header code, depending
  * on what's passed in) the port name, and all the cmd_buff arguments.
  */
-[[maybe_unused]] static std::string MakeFunctionString(const char* name, const char* port_name,
+[[maybe_unused]] static std::string MakeFunctionString(std::string_view name,
+                                                       std::string_view port_name,
                                                        const u32* cmd_buff) {
     // Number of params == bits 0-5 + bits 6-11
     int num_params = (cmd_buff[0] & 0x3F) + ((cmd_buff[0] >> 6) & 0x3F);
@@ -131,13 +127,11 @@ ServiceFrameworkBase::ServiceFrameworkBase(const char* service_name, u32 max_ses
 ServiceFrameworkBase::~ServiceFrameworkBase() = default;
 
 void ServiceFrameworkBase::InstallAsService(SM::ServiceManager& service_manager) {
-    ASSERT(port == nullptr);
-    port = service_manager.RegisterService(service_name, max_sessions).Unwrap();
+    auto port = service_manager.RegisterService(service_name, max_sessions).Unwrap();
     port->SetHleHandler(shared_from_this());
 }
 
 void ServiceFrameworkBase::InstallAsNamedPort(Kernel::KernelSystem& kernel) {
-    ASSERT(port == nullptr);
     auto [server_port, client_port] = kernel.CreatePortPair(max_sessions, service_name);
     server_port->SetHleHandler(shared_from_this());
     kernel.AddNamedPort(service_name, std::move(client_port));
@@ -177,12 +171,21 @@ void ServiceFrameworkBase::HandleSyncRequest(Kernel::HLERequestContext& context)
     auto itr = handlers.find(header_code);
     const FunctionInfoBase* info = itr == handlers.end() ? nullptr : &itr->second;
     if (info == nullptr || info->handler_callback == nullptr) {
+        context.ReportUnimplemented();
         return ReportUnimplementedFunction(context.CommandBuffer(), info);
     }
 
     LOG_TRACE(Service, "{}",
-              MakeFunctionString(info->name, GetServiceName().c_str(), context.CommandBuffer()));
+              MakeFunctionString(info->name, GetServiceName(), context.CommandBuffer()));
     handler_invoker(this, info->handler_callback, context);
+}
+
+std::string ServiceFrameworkBase::GetFunctionName(u32 header) const {
+    if (!handlers.count(header)) {
+        return "";
+    }
+
+    return handlers.at(header).name;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -199,7 +202,7 @@ static bool AttemptLLE(const ServiceModuleInfo& service_module) {
                   service_module.name);
         return false;
     }
-    Kernel::SharedPtr<Kernel::Process> process;
+    std::shared_ptr<Kernel::Process> process;
     loader->Load(process);
     LOG_DEBUG(Service, "Service module \"{}\" has been successfully loaded.", service_module.name);
     return true;

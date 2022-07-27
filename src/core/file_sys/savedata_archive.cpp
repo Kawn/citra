@@ -2,6 +2,7 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include "common/archives.h"
 #include "common/file_util.h"
 #include "core/file_sys/disk_archive.h"
 #include "core/file_sys/errors.h"
@@ -25,6 +26,16 @@ public:
         u64 IPCDelayNanoseconds = std::max<u64>(static_cast<u64>(length) * slope + offset, minimum);
         return IPCDelayNanoseconds;
     }
+
+    u64 GetOpenDelayNs() override {
+        // This is the delay measured on O3DS and O2DS with
+        // https://gist.github.com/FearlessTobi/c37e143c314789251f98f2c45cd706d2
+        // from the results the average of each length was taken.
+        static constexpr u64 IPCDelayNanoseconds(269082);
+        return IPCDelayNanoseconds;
+    }
+
+    SERIALIZE_DELAY_GENERATOR
 };
 
 ResultVal<std::unique_ptr<FileBackend>> SaveDataArchive::OpenFile(const Path& path,
@@ -340,8 +351,11 @@ ResultVal<std::unique_ptr<DirectoryBackend>> SaveDataArchive::OpenDirectory(
 }
 
 u64 SaveDataArchive::GetFreeBytes() const {
-    // TODO: Stubbed to return 1GiB
-    return 1024 * 1024 * 1024;
+    // TODO: Stubbed to return 32MiB
+    return 1024 * 1024 * 32;
 }
 
 } // namespace FileSys
+
+SERIALIZE_EXPORT_IMPL(FileSys::SaveDataArchive)
+SERIALIZE_EXPORT_IMPL(FileSys::SaveDataDelayGenerator)

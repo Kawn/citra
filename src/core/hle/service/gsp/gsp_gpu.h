@@ -5,7 +5,10 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
 #include <string>
+#include <boost/serialization/base_object.hpp>
+#include <boost/serialization/shared_ptr.hpp>
 #include "common/bit_field.h"
 #include "common/common_types.h"
 #include "core/hle/kernel/event.h"
@@ -182,16 +185,34 @@ struct CommandBuffer {
 };
 static_assert(sizeof(CommandBuffer) == 0x200, "CommandBuffer struct has incorrect size");
 
-struct SessionData : public Kernel::SessionRequestHandler::SessionDataBase {
-    SessionData();
+class GSP_GPU;
+
+class SessionData : public Kernel::SessionRequestHandler::SessionDataBase {
+public:
+    SessionData() = default;
+    SessionData(GSP_GPU* gsp);
     ~SessionData();
 
+    GSP_GPU* gsp;
+
     /// Event triggered when GSP interrupt has been signalled
-    Kernel::SharedPtr<Kernel::Event> interrupt_event;
+    std::shared_ptr<Kernel::Event> interrupt_event;
     /// Thread index into interrupt relay queue
     u32 thread_id;
     /// Whether RegisterInterruptRelayQueue was called for this session
     bool registered = false;
+
+private:
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int) {
+        ar& boost::serialization::base_object<Kernel::SessionRequestHandler::SessionDataBase>(
+            *this);
+        ar& gsp;
+        ar& interrupt_event;
+        ar& thread_id;
+        ar& registered;
+    }
+    friend class boost::serialization::access;
 };
 
 class GSP_GPU final : public ServiceFramework<GSP_GPU, SessionData> {
@@ -199,7 +220,7 @@ public:
     explicit GSP_GPU(Core::System& system);
     ~GSP_GPU() = default;
 
-    void ClientDisconnected(Kernel::SharedPtr<Kernel::ServerSession> server_session) override;
+    void ClientDisconnected(std::shared_ptr<Kernel::ServerSession> server_session) override;
 
     /**
      * Signals that the specified interrupt type has occurred to userland code
@@ -358,7 +379,7 @@ private:
      * Releases rights to the GPU.
      * Will fail if the session_data doesn't have the GPU right
      */
-    void ReleaseRight(SessionData* session_data);
+    void ReleaseRight(const SessionData* session_data);
 
     /**
      * GSP_GPU::ImportDisplayCaptureInfo service function
@@ -403,17 +424,44 @@ private:
     /// Returns the session data for the specified registered thread id, or nullptr if not found.
     SessionData* FindRegisteredThreadData(u32 thread_id);
 
+    u32 GetUnusedThreadId() const;
+
+    std::unique_ptr<Kernel::SessionRequestHandler::SessionDataBase> MakeSessionData() override;
+
     Core::System& system;
 
     /// GSP shared memory
-    Kernel::SharedPtr<Kernel::SharedMemory> shared_memory;
+    std::shared_ptr<Kernel::SharedMemory> shared_memory;
 
-    /// Thread id that currently has GPU rights or -1 if none.
-    int active_thread_id = -1;
+    /// Thread id that currently has GPU rights or UINT32_MAX if none.
+    u32 active_thread_id = UINT32_MAX;
 
     bool first_initialization = true;
+
+    /// Maximum number of threads that can be registered at the same time in the GSP module.
+    static constexpr u32 MaxGSPThreads = 4;
+
+    /// Thread ids currently in use by the sessions connected to the GSPGPU service.
+    std::array<bool, MaxGSPThreads> used_thread_ids = {false, false, false, false};
+
+    friend class SessionData;
+
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int) {
+        ar& boost::serialization::base_object<Kernel::SessionRequestHandler>(*this);
+        ar& shared_memory;
+        ar& active_thread_id;
+        ar& first_initialization;
+        ar& used_thread_ids;
+    }
+
+    friend class boost::serialization::access;
 };
 
 ResultCode SetBufferSwap(u32 screen_id, const FrameBufferInfo& info);
 
 } // namespace Service::GSP
+
+BOOST_CLASS_EXPORT_KEY(Service::GSP::SessionData)
+BOOST_CLASS_EXPORT_KEY(Service::GSP::GSP_GPU)
+SERVICE_CONSTRUCT(Service::GSP::GSP_GPU)

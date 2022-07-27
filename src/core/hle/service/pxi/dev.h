@@ -4,7 +4,6 @@
 
 #pragma once
 
-#include "core/hle/kernel/kernel.h"
 #include "core/hle/service/service.h"
 
 namespace Service::PXI {
@@ -14,6 +13,11 @@ class DEV final : public ServiceFramework<DEV> {
 public:
     DEV();
     ~DEV();
+
+private:
+    SERVICE_SERIALIZATION_SIMPLE
 };
 
 } // namespace Service::PXI
+
+BOOST_CLASS_EXPORT_KEY(Service::PXI::DEV)

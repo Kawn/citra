@@ -7,11 +7,16 @@
 
 namespace AudioCore::HLE {
 
+using namespace MFDecoder;
+
 class WMFDecoder::Impl {
 public:
     explicit Impl(Memory::MemorySystem& memory);
     ~Impl();
     std::optional<BinaryResponse> ProcessRequest(const BinaryRequest& request);
+    bool IsValid() const {
+        return is_valid;
+    }
 
 private:
     std::optional<BinaryResponse> Initalize(const BinaryRequest& request);
@@ -28,21 +33,35 @@ private:
     unique_mfptr<IMFTransform> transform;
     DWORD in_stream_id = 0;
     DWORD out_stream_id = 0;
+    bool is_valid = false;
+    bool mf_started = false;
+    bool coinited = false;
 };
 
 WMFDecoder::Impl::Impl(Memory::MemorySystem& memory) : memory(memory) {
+    // Attempt to load the symbols for mf.dll
+    if (!InitMFDLL()) {
+        LOG_CRITICAL(Audio_DSP,
+                     "Unable to load mf.dll. AAC audio through media foundation unavailable");
+        return;
+    }
+
     HRESULT hr = S_OK;
     hr = CoInitialize(NULL);
     // S_FALSE will be returned when COM has already been initialized
     if (hr != S_OK && hr != S_FALSE) {
         ReportError("Failed to start COM components", hr);
+    } else {
+        coinited = true;
     }
 
     // lite startup is faster and all what we need is included
-    hr = MFStartup(MF_VERSION, MFSTARTUP_LITE);
+    hr = MFDecoder::MFStartup(MF_VERSION, MFSTARTUP_LITE);
     if (hr != S_OK) {
         // Do you know you can't initialize MF in test mode or safe mode?
         ReportError("Failed to initialize Media Foundation", hr);
+    } else {
+        mf_started = true;
     }
 
     LOG_INFO(Audio_DSP, "Media Foundation activated");
@@ -64,6 +83,7 @@ WMFDecoder::Impl::Impl(Memory::MemorySystem& memory) : memory(memory) {
         return;
     }
     transform_initialized = true;
+    is_valid = true;
 }
 
 WMFDecoder::Impl::~Impl() {
@@ -73,14 +93,18 @@ WMFDecoder::Impl::~Impl() {
         // otherwise access violation will occur
         transform.reset();
     }
-    MFShutdown();
-    CoUninitialize();
+    if (mf_started) {
+        MFDecoder::MFShutdown();
+    }
+    if (coinited) {
+        CoUninitialize();
+    }
 }
 
 std::optional<BinaryResponse> WMFDecoder::Impl::ProcessRequest(const BinaryRequest& request) {
     if (request.codec != DecoderCodec::AAC) {
         LOG_ERROR(Audio_DSP, "Got unknown codec {}", static_cast<u16>(request.codec));
-        return {};
+        return std::nullopt;
     }
 
     switch (request.cmd) {
@@ -99,7 +123,7 @@ std::optional<BinaryResponse> WMFDecoder::Impl::ProcessRequest(const BinaryReque
     }
     default:
         LOG_ERROR(Audio_DSP, "Got unknown binary request: {}", static_cast<u16>(request.cmd));
-        return {};
+        return std::nullopt;
     }
 }
 
@@ -129,7 +153,7 @@ MFOutputState WMFDecoder::Impl::DecodingLoop(ADTSData adts_header,
             f32 val_f32;
             for (std::size_t i = 0; i < output_buffer->size();) {
                 for (std::size_t channel = 0; channel < adts_header.channels; channel++) {
-                    val_f32 = output_buffer->at(i);
+                    val_f32 = std::clamp(output_buffer->at(i), -1.0f, 1.0f);
                     s16 val = static_cast<s16>(0x7FFF * val_f32);
                     out_streams[channel].push_back(val & 0xFF);
                     out_streams[channel].push_back(val >> 8);
@@ -139,9 +163,10 @@ MFOutputState WMFDecoder::Impl::DecodingLoop(ADTSData adts_header,
             }
         }
 
-        // in case of "ok" only, just return quickly
+        // If we return OK here, the decoder won't be in a state to receive new data and will fail
+        // on the next call; instead treat it like the HaveMoreData case
         if (output_status == MFOutputState::OK)
-            return MFOutputState::OK;
+            continue;
 
         // for status = 2, reset MF
         if (output_status == MFOutputState::NeedReconfig) {
@@ -180,7 +205,7 @@ std::optional<BinaryResponse> WMFDecoder::Impl::Decode(const BinaryRequest& requ
     if (request.src_addr < Memory::FCRAM_PADDR ||
         request.src_addr + request.size > Memory::FCRAM_PADDR + Memory::FCRAM_SIZE) {
         LOG_ERROR(Audio_DSP, "Got out of bounds src_addr {:08x}", request.src_addr);
-        return {};
+        return std::nullopt;
     }
     u8* data = memory.GetFCRAMPointer(request.src_addr - Memory::FCRAM_PADDR);
 
@@ -195,6 +220,7 @@ std::optional<BinaryResponse> WMFDecoder::Impl::Decode(const BinaryRequest& requ
         return response;
     }
 
+    response.sample_rate = GetSampleRateEnum(adts_meta->ADTSHeader.samplerate);
     response.num_channels = adts_meta->ADTSHeader.channels;
 
     if (!format_selected) {
@@ -243,7 +269,7 @@ std::optional<BinaryResponse> WMFDecoder::Impl::Decode(const BinaryRequest& requ
             request.dst_addr_ch0 + out_streams[0].size() >
                 Memory::FCRAM_PADDR + Memory::FCRAM_SIZE) {
             LOG_ERROR(Audio_DSP, "Got out of bounds dst_addr_ch0 {:08x}", request.dst_addr_ch0);
-            return {};
+            return std::nullopt;
         }
         std::memcpy(memory.GetFCRAMPointer(request.dst_addr_ch0 - Memory::FCRAM_PADDR),
                     out_streams[0].data(), out_streams[0].size());
@@ -254,7 +280,7 @@ std::optional<BinaryResponse> WMFDecoder::Impl::Decode(const BinaryRequest& requ
             request.dst_addr_ch1 + out_streams[1].size() >
                 Memory::FCRAM_PADDR + Memory::FCRAM_SIZE) {
             LOG_ERROR(Audio_DSP, "Got out of bounds dst_addr_ch1 {:08x}", request.dst_addr_ch1);
-            return {};
+            return std::nullopt;
         }
         std::memcpy(memory.GetFCRAMPointer(request.dst_addr_ch1 - Memory::FCRAM_PADDR),
                     out_streams[1].data(), out_streams[1].size());
@@ -269,6 +295,10 @@ WMFDecoder::~WMFDecoder() = default;
 
 std::optional<BinaryResponse> WMFDecoder::ProcessRequest(const BinaryRequest& request) {
     return impl->ProcessRequest(request);
+}
+
+bool WMFDecoder::IsValid() const {
+    return impl->IsValid();
 }
 
 } // namespace AudioCore::HLE

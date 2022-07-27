@@ -8,6 +8,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <boost/serialization/vector.hpp>
 #include "common/common_types.h"
 #include "network/room.h"
 
@@ -30,6 +31,17 @@ struct WifiPacket {
     MacAddress transmitter_address; ///< Mac address of the transmitter.
     MacAddress destination_address; ///< Mac address of the receiver.
     u8 channel;                     ///< WiFi channel where this frame was transmitted.
+
+private:
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int) {
+        ar& type;
+        ar& data;
+        ar& transmitter_address;
+        ar& destination_address;
+        ar& channel;
+    }
+    friend class boost::serialization::access;
 };
 
 /// Represents a chat message.
@@ -150,8 +162,8 @@ public:
      * This may fail if the username or console ID is already taken.
      */
     void Join(const std::string& nickname, const std::string& console_id_hash,
-              const char* server_addr = "127.0.0.1", const u16 server_port = DefaultRoomPort,
-              const u16 client_port = 0, const MacAddress& preferred_mac = NoPreferredMac,
+              const char* server_addr = "127.0.0.1", u16 server_port = DefaultRoomPort,
+              u16 client_port = 0, const MacAddress& preferred_mac = NoPreferredMac,
               const std::string& password = "", const std::string& token = "");
 
     /**
@@ -263,8 +275,10 @@ private:
     std::unique_ptr<RoomMemberImpl> room_member_impl;
 };
 
-static const char* GetStateStr(const RoomMember::State& s) {
+inline const char* GetStateStr(const RoomMember::State& s) {
     switch (s) {
+    case RoomMember::State::Uninitialized:
+        return "Uninitialized";
     case RoomMember::State::Idle:
         return "Idle";
     case RoomMember::State::Joining:
@@ -277,7 +291,7 @@ static const char* GetStateStr(const RoomMember::State& s) {
     return "Unknown";
 }
 
-static const char* GetErrorStr(const RoomMember::Error& e) {
+inline const char* GetErrorStr(const RoomMember::Error& e) {
     switch (e) {
     case RoomMember::Error::LostConnection:
         return "LostConnection";
@@ -305,8 +319,9 @@ static const char* GetErrorStr(const RoomMember::Error& e) {
         return "PermissionDenied";
     case RoomMember::Error::NoSuchUser:
         return "NoSuchUser";
+    default:
+        return "Unknown";
     }
-    return "Unknown";
 }
 
 } // namespace Network

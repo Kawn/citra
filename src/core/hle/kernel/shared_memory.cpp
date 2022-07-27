@@ -3,11 +3,14 @@
 // Refer to the license.txt file included.
 
 #include <cstring>
+#include "common/archives.h"
 #include "common/logging/log.h"
 #include "core/hle/kernel/errors.h"
 #include "core/hle/kernel/memory.h"
 #include "core/hle/kernel/shared_memory.h"
 #include "core/memory.h"
+
+SERIALIZE_EXPORT_IMPL(Kernel::SharedMemory)
 
 namespace Kernel {
 
@@ -24,10 +27,10 @@ SharedMemory::~SharedMemory() {
     }
 }
 
-ResultVal<SharedPtr<SharedMemory>> KernelSystem::CreateSharedMemory(
+ResultVal<std::shared_ptr<SharedMemory>> KernelSystem::CreateSharedMemory(
     Process* owner_process, u32 size, MemoryPermission permissions,
     MemoryPermission other_permissions, VAddr address, MemoryRegion region, std::string name) {
-    SharedPtr<SharedMemory> shared_memory(new SharedMemory(*this));
+    auto shared_memory{std::make_shared<SharedMemory>(*this)};
 
     shared_memory->owner_process = owner_process;
     shared_memory->name = std::move(name);
@@ -38,13 +41,13 @@ ResultVal<SharedPtr<SharedMemory>> KernelSystem::CreateSharedMemory(
     if (address == 0) {
         // We need to allocate a block from the Linear Heap ourselves.
         // We'll manually allocate some memory from the linear heap in the specified region.
-        MemoryRegionInfo* memory_region = GetMemoryRegion(region);
+        auto memory_region = GetMemoryRegion(region);
         auto offset = memory_region->LinearAllocate(size);
 
         ASSERT_MSG(offset, "Not enough space in region to allocate shared memory!");
 
         std::fill(memory.GetFCRAMPointer(*offset), memory.GetFCRAMPointer(*offset + size), 0);
-        shared_memory->backing_blocks = {{memory.GetFCRAMPointer(*offset), size}};
+        shared_memory->backing_blocks = {{memory.GetFCRAMRef(*offset), size}};
         shared_memory->holding_memory += MemoryRegionInfo::Interval(*offset, *offset + size);
         shared_memory->linear_heap_phys_offset = *offset;
 
@@ -69,13 +72,13 @@ ResultVal<SharedPtr<SharedMemory>> KernelSystem::CreateSharedMemory(
     return MakeResult(shared_memory);
 }
 
-SharedPtr<SharedMemory> KernelSystem::CreateSharedMemoryForApplet(
+std::shared_ptr<SharedMemory> KernelSystem::CreateSharedMemoryForApplet(
     u32 offset, u32 size, MemoryPermission permissions, MemoryPermission other_permissions,
     std::string name) {
-    SharedPtr<SharedMemory> shared_memory(new SharedMemory(*this));
+    auto shared_memory{std::make_shared<SharedMemory>(*this)};
 
     // Allocate memory in heap
-    MemoryRegionInfo* memory_region = GetMemoryRegion(MemoryRegion::SYSTEM);
+    auto memory_region = GetMemoryRegion(MemoryRegion::SYSTEM);
     auto backing_blocks = memory_region->HeapAllocate(size);
     ASSERT_MSG(!backing_blocks.empty(), "Not enough space in region to allocate shared memory!");
     shared_memory->holding_memory = backing_blocks;
@@ -86,7 +89,7 @@ SharedPtr<SharedMemory> KernelSystem::CreateSharedMemoryForApplet(
     shared_memory->other_permissions = other_permissions;
     for (const auto& interval : backing_blocks) {
         shared_memory->backing_blocks.push_back(
-            {memory.GetFCRAMPointer(interval.lower()), interval.upper() - interval.lower()});
+            {memory.GetFCRAMRef(interval.lower()), interval.upper() - interval.lower()});
         std::fill(memory.GetFCRAMPointer(interval.lower()),
                   memory.GetFCRAMPointer(interval.upper()), 0);
     }

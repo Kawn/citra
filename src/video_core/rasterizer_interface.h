@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <atomic>
+#include <functional>
 #include "common/common_types.h"
 #include "core/hw/gpu.h"
 
@@ -16,6 +18,14 @@ struct OutputVertex;
 } // namespace Pica::Shader
 
 namespace VideoCore {
+
+enum class LoadCallbackStage {
+    Prepare,
+    Decompile,
+    Build,
+    Complete,
+};
+using DiskResourceLoadCallback = std::function<void(LoadCallbackStage, std::size_t, std::size_t)>;
 
 class RasterizerInterface {
 public:
@@ -45,6 +55,9 @@ public:
     /// and invalidated
     virtual void FlushAndInvalidateRegion(PAddr addr, u32 size) = 0;
 
+    /// Removes as much state as possible from the rasterizer in preparation for a save/load state
+    virtual void ClearAll(bool flush) = 0;
+
     /// Attempt to use a faster method to perform a display transfer with is_texture_copy = 0
     virtual bool AccelerateDisplayTransfer(const GPU::Regs::DisplayTransferConfig& config) {
         return false;
@@ -71,5 +84,10 @@ public:
     virtual bool AccelerateDrawBatch(bool is_indexed) {
         return false;
     }
+
+    virtual void LoadDiskResources(const std::atomic_bool& stop_loading,
+                                   const DiskResourceLoadCallback& callback) {}
+
+    virtual void SyncEntireState() {}
 };
 } // namespace VideoCore

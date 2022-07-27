@@ -3,7 +3,10 @@
 // Refer to the license.txt file included.
 
 #include <tuple>
-
+#include <boost/serialization/shared_ptr.hpp>
+#include <boost/serialization/string.hpp>
+#include <boost/serialization/vector.hpp>
+#include "common/archives.h"
 #include "core/hle/kernel/client_port.h"
 #include "core/hle/kernel/client_session.h"
 #include "core/hle/kernel/hle_ipc.h"
@@ -11,7 +14,21 @@
 #include "core/hle/kernel/session.h"
 #include "core/hle/kernel/thread.h"
 
+SERIALIZE_EXPORT_IMPL(Kernel::ServerSession)
+
 namespace Kernel {
+
+template <class Archive>
+void ServerSession::serialize(Archive& ar, const unsigned int file_version) {
+    ar& boost::serialization::base_object<WaitObject>(*this);
+    ar& name;
+    ar& parent;
+    ar& hle_handler;
+    ar& pending_requesting_threads;
+    ar& currently_handling;
+    ar& mapped_buffer_context;
+}
+SERIALIZE_IMPL(ServerSession)
 
 ServerSession::ServerSession(KernelSystem& kernel) : WaitObject(kernel), kernel(kernel) {}
 ServerSession::~ServerSession() {
@@ -28,8 +45,9 @@ ServerSession::~ServerSession() {
     parent->server = nullptr;
 }
 
-ResultVal<SharedPtr<ServerSession>> ServerSession::Create(KernelSystem& kernel, std::string name) {
-    SharedPtr<ServerSession> server_session(new ServerSession(kernel));
+ResultVal<std::shared_ptr<ServerSession>> ServerSession::Create(KernelSystem& kernel,
+                                                                std::string name) {
+    auto server_session{std::make_shared<ServerSession>(kernel)};
 
     server_session->name = std::move(name);
     server_session->parent = nullptr;
@@ -37,7 +55,7 @@ ResultVal<SharedPtr<ServerSession>> ServerSession::Create(KernelSystem& kernel, 
     return MakeResult(std::move(server_session));
 }
 
-bool ServerSession::ShouldWait(Thread* thread) const {
+bool ServerSession::ShouldWait(const Thread* thread) const {
     // Closed sessions should never wait, an error will be returned from svcReplyAndReceive.
     if (parent->client == nullptr)
         return false;
@@ -59,7 +77,7 @@ void ServerSession::Acquire(Thread* thread) {
     pending_requesting_threads.pop_back();
 }
 
-ResultCode ServerSession::HandleSyncRequest(SharedPtr<Thread> thread) {
+ResultCode ServerSession::HandleSyncRequest(std::shared_ptr<Thread> thread) {
     // The ServerSession received a sync request, this means that there's new data available
     // from its ClientSession, so wake up any threads that may be waiting on a svcReplyAndReceive or
     // similar.
@@ -67,14 +85,16 @@ ResultCode ServerSession::HandleSyncRequest(SharedPtr<Thread> thread) {
     // If this ServerSession has an associated HLE handler, forward the request to it.
     if (hle_handler != nullptr) {
         std::array<u32_le, IPC::COMMAND_BUFFER_LENGTH + 2 * IPC::MAX_STATIC_BUFFERS> cmd_buf;
-        Kernel::Process* current_process = thread->owner_process;
+        auto current_process = thread->owner_process.lock();
+        ASSERT(current_process);
         kernel.memory.ReadBlock(*current_process, thread->GetCommandBufferAddress(), cmd_buf.data(),
                                 cmd_buf.size() * sizeof(u32));
 
-        Kernel::HLERequestContext context(kernel, this);
-        context.PopulateFromIncomingCommandBuffer(cmd_buf.data(), *current_process);
+        auto context =
+            std::make_shared<Kernel::HLERequestContext>(kernel, SharedFrom(this), thread);
+        context->PopulateFromIncomingCommandBuffer(cmd_buf.data(), current_process);
 
-        hle_handler->HandleSyncRequest(context);
+        hle_handler->HandleSyncRequest(*context);
 
         ASSERT(thread->status == Kernel::ThreadStatus::Running ||
                thread->status == Kernel::ThreadStatus::WaitHleEvent);
@@ -82,7 +102,7 @@ ResultCode ServerSession::HandleSyncRequest(SharedPtr<Thread> thread) {
         // put the thread to sleep then the writing of the command buffer will be deferred to the
         // wakeup callback.
         if (thread->status == Kernel::ThreadStatus::Running) {
-            context.WriteToOutgoingCommandBuffer(cmd_buf.data(), *current_process);
+            context->WriteToOutgoingCommandBuffer(cmd_buf.data(), *current_process);
             kernel.memory.WriteBlock(*current_process, thread->GetCommandBufferAddress(),
                                      cmd_buf.data(), cmd_buf.size() * sizeof(u32));
         }
@@ -119,10 +139,10 @@ ResultCode ServerSession::HandleSyncRequest(SharedPtr<Thread> thread) {
     return RESULT_SUCCESS;
 }
 
-std::tuple<SharedPtr<ServerSession>, SharedPtr<ClientSession>> KernelSystem::CreateSessionPair(
-    const std::string& name, SharedPtr<ClientPort> port) {
+KernelSystem::SessionPair KernelSystem::CreateSessionPair(const std::string& name,
+                                                          std::shared_ptr<ClientPort> port) {
     auto server_session = ServerSession::Create(*this, name + "_Server").Unwrap();
-    SharedPtr<ClientSession> client_session(new ClientSession(*this));
+    auto client_session{std::make_shared<ClientSession>(*this)};
     client_session->name = name + "_Client";
 
     std::shared_ptr<Session> parent(new Session);
@@ -133,7 +153,7 @@ std::tuple<SharedPtr<ServerSession>, SharedPtr<ClientSession>> KernelSystem::Cre
     client_session->parent = parent;
     server_session->parent = parent;
 
-    return std::make_tuple(std::move(server_session), std::move(client_session));
+    return std::make_pair(std::move(server_session), std::move(client_session));
 }
 
 } // namespace Kernel

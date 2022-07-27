@@ -3,6 +3,7 @@
 // Refer to the license.txt file included.
 
 #include <algorithm>
+#include "common/archives.h"
 #include "common/bit_set.h"
 #include "common/logging/log.h"
 #include "core/core.h"
@@ -20,7 +21,36 @@
 #include "core/memory.h"
 #include "core/settings.h"
 
+SERVICE_CONSTRUCT_IMPL(Service::CAM::Module)
+
 namespace Service::CAM {
+
+template <class Archive>
+void Module::serialize(Archive& ar, const unsigned int file_version) {
+    ar& cameras;
+    ar& ports;
+    ar& is_camera_reload_pending;
+    if (file_version > 0) {
+        ar& initialized;
+    } else {
+        initialized = true;
+    }
+    if (Archive::is_loading::value && initialized) {
+        for (int i = 0; i < NumCameras; i++) {
+            LoadCameraImplementation(cameras[i], i);
+        }
+        for (std::size_t i = 0; i < ports.size(); i++) {
+            if (ports[i].is_busy) {
+                cameras[ports[i].camera_id].impl->StartCapture();
+            }
+            if (ports[i].is_receiving) {
+                StartReceiving(static_cast<int>(i));
+            }
+        }
+    }
+}
+
+SERIALIZE_IMPL(Module)
 
 // built-in resolution parameters
 constexpr std::array<Resolution, 8> PRESET_RESOLUTION{{
@@ -60,6 +90,7 @@ void Module::PortConfig::Clear() {
     completion_event->Clear();
     buffer_error_interrupt_event->Clear();
     vsync_interrupt_event->Clear();
+    vsync_timings.clear();
     is_receiving = false;
     is_active = false;
     is_pending_receiving = false;
@@ -133,6 +164,27 @@ void Module::CompletionEventCallBack(u64 port_id, s64) {
     port.completion_event->Signal();
 }
 
+static constexpr std::size_t MaxVsyncTimings = 5;
+
+void Module::VsyncInterruptEventCallBack(u64 port_id, s64 cycles_late) {
+    PortConfig& port = ports[port_id];
+    const CameraConfig& camera = cameras[port.camera_id];
+
+    if (!port.is_active) {
+        return;
+    }
+
+    port.vsync_timings.emplace_front(system.CoreTiming().GetGlobalTimeUs().count());
+    if (port.vsync_timings.size() > MaxVsyncTimings) {
+        port.vsync_timings.pop_back();
+    }
+    port.vsync_interrupt_event->Signal();
+
+    system.CoreTiming().ScheduleEvent(
+        msToCycles(LATENCY_BY_FRAME_RATE[static_cast<int>(camera.frame_rate)]) - cycles_late,
+        vsync_interrupt_event_callback, port_id);
+}
+
 void Module::StartReceiving(int port_id) {
     PortConfig& port = ports[port_id];
     port.is_receiving = true;
@@ -173,6 +225,9 @@ void Module::ActivatePort(int port_id, int camera_id) {
     }
     ports[port_id].is_active = true;
     ports[port_id].camera_id = camera_id;
+    system.CoreTiming().ScheduleEvent(
+        msToCycles(LATENCY_BY_FRAME_RATE[static_cast<int>(cameras[camera_id].frame_rate)]),
+        vsync_interrupt_event_callback, port_id);
 }
 
 template <int max_index>
@@ -631,6 +686,7 @@ void Module::Interface::Activate(Kernel::HLERequestContext& ctx) {
                     cam->ports[i].is_busy = false;
                 }
                 cam->ports[i].is_active = false;
+                cam->system.CoreTiming().UnscheduleEvent(cam->vsync_interrupt_event_callback, i);
             }
             rb.Push(RESULT_SUCCESS);
         } else if (camera_select[0] && camera_select[1]) {
@@ -707,7 +763,7 @@ void Module::Interface::FlipImage(Kernel::HLERequestContext& ctx) {
     }
 
     LOG_DEBUG(Service_CAM, "called, camera_select={}, flip={}, context_select={}",
-              camera_select.m_val, static_cast<int>(flip), context_select.m_val);
+              camera_select.m_val, flip, context_select.m_val);
 }
 
 void Module::Interface::SetDetailSize(Kernel::HLERequestContext& ctx) {
@@ -791,7 +847,7 @@ void Module::Interface::SetFrameRate(Kernel::HLERequestContext& ctx) {
     }
 
     LOG_WARNING(Service_CAM, "(STUBBED) called, camera_select={}, frame_rate={}",
-                camera_select.m_val, static_cast<int>(frame_rate));
+                camera_select.m_val, frame_rate);
 }
 
 void Module::Interface::SetEffect(Kernel::HLERequestContext& ctx) {
@@ -818,7 +874,7 @@ void Module::Interface::SetEffect(Kernel::HLERequestContext& ctx) {
     }
 
     LOG_DEBUG(Service_CAM, "called, camera_select={}, effect={}, context_select={}",
-              camera_select.m_val, static_cast<int>(effect), context_select.m_val);
+              camera_select.m_val, effect, context_select.m_val);
 }
 
 void Module::Interface::SetOutputFormat(Kernel::HLERequestContext& ctx) {
@@ -845,7 +901,7 @@ void Module::Interface::SetOutputFormat(Kernel::HLERequestContext& ctx) {
     }
 
     LOG_DEBUG(Service_CAM, "called, camera_select={}, format={}, context_select={}",
-              camera_select.m_val, static_cast<int>(format), context_select.m_val);
+              camera_select.m_val, format, context_select.m_val);
 }
 
 void Module::Interface::SynchronizeVsyncTiming(Kernel::HLERequestContext& ctx) {
@@ -858,6 +914,34 @@ void Module::Interface::SynchronizeVsyncTiming(Kernel::HLERequestContext& ctx) {
 
     LOG_WARNING(Service_CAM, "(STUBBED) called, camera_select1={}, camera_select2={}",
                 camera_select1, camera_select2);
+}
+
+void Module::Interface::GetLatestVsyncTiming(Kernel::HLERequestContext& ctx) {
+    IPC::RequestParser rp(ctx, 0x2A, 2, 0);
+    const PortSet port_select(rp.Pop<u8>());
+    const u32 count = rp.Pop<u32>();
+
+    if (!port_select.IsSingle() || count > MaxVsyncTimings) {
+        IPC::RequestBuilder rb = rp.MakeBuilder(1, 2);
+        rb.Push(ERROR_OUT_OF_RANGE);
+        rb.PushStaticBuffer({}, 0);
+        return;
+    }
+
+    IPC::RequestBuilder rb = rp.MakeBuilder(1, 2);
+    rb.Push(RESULT_SUCCESS);
+
+    const std::size_t port_id = port_select.m_val == 1 ? 0 : 1;
+    std::vector<u8> out(count * sizeof(s64_le));
+    std::size_t offset = 0;
+    for (const s64_le timing : cam->ports[port_id].vsync_timings) {
+        std::memcpy(out.data() + offset * sizeof(timing), &timing, sizeof(timing));
+        offset++;
+        if (offset >= count) {
+            break;
+        }
+    }
+    rb.PushStaticBuffer(std::move(out), 0);
 }
 
 void Module::Interface::GetStereoCameraCalibrationData(Kernel::HLERequestContext& ctx) {
@@ -998,6 +1082,8 @@ void Module::Interface::DriverInitialize(Kernel::HLERequestContext& ctx) {
         port.Clear();
     }
 
+    cam->initialized = true;
+
     rb.Push(RESULT_SUCCESS);
 
     LOG_DEBUG(Service_CAM, "called");
@@ -1013,6 +1099,8 @@ void Module::Interface::DriverFinalize(Kernel::HLERequestContext& ctx) {
     for (CameraConfig& camera : cam->cameras) {
         camera.impl = nullptr;
     }
+
+    cam->initialized = false;
 
     rb.Push(RESULT_SUCCESS);
 
@@ -1032,6 +1120,10 @@ Module::Module(Core::System& system) : system(system) {
     completion_event_callback = system.CoreTiming().RegisterEvent(
         "CAM::CompletionEventCallBack",
         [this](u64 userdata, s64 cycles_late) { CompletionEventCallBack(userdata, cycles_late); });
+    vsync_interrupt_event_callback = system.CoreTiming().RegisterEvent(
+        "CAM::VsyncInterruptEventCallBack", [this](u64 userdata, s64 cycles_late) {
+            VsyncInterruptEventCallBack(userdata, cycles_late);
+        });
 }
 
 Module::~Module() {

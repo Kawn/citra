@@ -8,6 +8,10 @@
 #include <string>
 #include <type_traits>
 #include <unordered_map>
+#include <boost/serialization/shared_ptr.hpp>
+#include <boost/serialization/split_member.hpp>
+#include <boost/serialization/string.hpp>
+#include <boost/serialization/unordered_map.hpp>
 #include "core/hle/kernel/client_port.h"
 #include "core/hle/kernel/object.h"
 #include "core/hle/kernel/server_port.h"
@@ -47,10 +51,12 @@ public:
 
     explicit ServiceManager(Core::System& system);
 
-    ResultVal<Kernel::SharedPtr<Kernel::ServerPort>> RegisterService(std::string name,
-                                                                     unsigned int max_sessions);
-    ResultVal<Kernel::SharedPtr<Kernel::ClientPort>> GetServicePort(const std::string& name);
-    ResultVal<Kernel::SharedPtr<Kernel::ClientSession>> ConnectToService(const std::string& name);
+    ResultVal<std::shared_ptr<Kernel::ServerPort>> RegisterService(std::string name,
+                                                                   unsigned int max_sessions);
+    ResultVal<std::shared_ptr<Kernel::ClientPort>> GetServicePort(const std::string& name);
+    ResultVal<std::shared_ptr<Kernel::ClientSession>> ConnectToService(const std::string& name);
+    // For IPC Recorder
+    std::string GetServiceNameByPortId(u32 port) const;
 
     template <typename T>
     std::shared_ptr<T> GetService(const std::string& service_name) const {
@@ -73,7 +79,29 @@ private:
     std::weak_ptr<SRV> srv_interface;
 
     /// Map of registered services, retrieved using GetServicePort or ConnectToService.
-    std::unordered_map<std::string, Kernel::SharedPtr<Kernel::ClientPort>> registered_services;
+    std::unordered_map<std::string, std::shared_ptr<Kernel::ClientPort>> registered_services;
+
+    // For IPC Recorder
+    /// client port Object id -> service name
+    std::unordered_map<u32, std::string> registered_services_inverse;
+
+    template <class Archive>
+    void save(Archive& ar, const unsigned int file_version) const {
+        ar << registered_services;
+    }
+
+    template <class Archive>
+    void load(Archive& ar, const unsigned int file_version) {
+        ar >> registered_services;
+        registered_services_inverse.clear();
+        for (const auto& pair : registered_services) {
+            registered_services_inverse.emplace(pair.second->GetObjectId(), pair.first);
+        }
+    }
+
+    BOOST_SERIALIZATION_SPLIT_MEMBER()
+
+    friend class boost::serialization::access;
 };
 
 } // namespace Service::SM

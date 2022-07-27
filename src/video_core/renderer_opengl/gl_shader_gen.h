@@ -16,6 +16,12 @@
 
 namespace OpenGL {
 
+namespace ShaderDecompiler {
+struct ProgramResult;
+}
+
+enum class ProgramType : u32 { VS, GS, FS };
+
 enum Attributes {
     ATTRIBUTE_POSITION,
     ATTRIBUTE_COLOR,
@@ -27,11 +33,7 @@ enum Attributes {
     ATTRIBUTE_VIEW,
 };
 
-// NOTE: MSVC15 (Update 2) doesn't think `delete`'d constructors and operators are TC.
-//       This makes BitField not TC when used in a union or struct so we have to resort
-//       to this ugly hack.
-//       Once that bug is fixed we can use Pica::Regs::TevStageConfig here.
-//       Doesn't include const_color because we don't sync it, see comment in BuildFromRegs()
+// Doesn't include const_color because we don't sync it, see comment in BuildFromRegs()
 struct TevStageConfigRaw {
     u32 sources_raw;
     u32 modifiers_raw;
@@ -59,6 +61,8 @@ struct PicaFSConfigState {
     Pica::RasterizerRegs::DepthBuffering depthmap_enable;
     Pica::TexturingRegs::FogMode fog_mode;
     bool fog_flip;
+    bool alphablend_enable;
+    Pica::FramebufferRegs::LogicOp logic_op;
 
     struct {
         struct {
@@ -165,8 +169,11 @@ struct PicaShaderConfigCommon {
  * shader.
  */
 struct PicaVSConfig : Common::HashableStruct<PicaShaderConfigCommon> {
-    explicit PicaVSConfig(const Pica::Regs& regs, Pica::Shader::ShaderSetup& setup) {
-        state.Init(regs.vs, setup);
+    explicit PicaVSConfig(const Pica::ShaderRegs& regs, Pica::Shader::ShaderSetup& setup) {
+        state.Init(regs, setup);
+    }
+    explicit PicaVSConfig(const PicaShaderConfigCommon& conf) {
+        state = conf;
     }
 };
 
@@ -195,55 +202,27 @@ struct PicaFixedGSConfig : Common::HashableStruct<PicaGSConfigCommonRaw> {
     }
 };
 
-struct PicaGSConfigRaw : PicaShaderConfigCommon, PicaGSConfigCommonRaw {
-    void Init(const Pica::Regs& regs, Pica::Shader::ShaderSetup& setup);
-
-    u32 num_inputs;
-    u32 attributes_per_vertex;
-
-    // input_map[input register index] -> input attribute index
-    std::array<u32, 16> input_map;
-};
-
-/**
- * This struct contains information to identify a GL geometry shader generated from PICA geometry
- * shader.
- */
-struct PicaGSConfig : Common::HashableStruct<PicaGSConfigRaw> {
-    explicit PicaGSConfig(const Pica::Regs& regs, Pica::Shader::ShaderSetup& setups) {
-        state.Init(regs, setups);
-    }
-};
-
 /**
  * Generates the GLSL vertex shader program source code that accepts vertices from software shader
  * and directly passes them to the fragment shader.
  * @param separable_shader generates shader that can be used for separate shader object
  * @returns String of the shader source code
  */
-std::string GenerateTrivialVertexShader(bool separable_shader);
+ShaderDecompiler::ProgramResult GenerateTrivialVertexShader(bool separable_shader);
 
 /**
  * Generates the GLSL vertex shader program source code for the given VS program
  * @returns String of the shader source code; boost::none on failure
  */
-std::optional<std::string> GenerateVertexShader(const Pica::Shader::ShaderSetup& setup,
-                                                const PicaVSConfig& config, bool separable_shader);
+std::optional<ShaderDecompiler::ProgramResult> GenerateVertexShader(
+    const Pica::Shader::ShaderSetup& setup, const PicaVSConfig& config, bool separable_shader);
 
 /*
  * Generates the GLSL fixed geometry shader program source code for non-GS PICA pipeline
  * @returns String of the shader source code
  */
-std::string GenerateFixedGeometryShader(const PicaFixedGSConfig& config, bool separable_shader);
-
-/**
- * Generates the GLSL geometry shader program source code for the given GS program and its
- * configuration
- * @returns String of the shader source code; boost::none on failure
- */
-std::optional<std::string> GenerateGeometryShader(const Pica::Shader::ShaderSetup& setup,
-                                                  const PicaGSConfig& config,
-                                                  bool separable_shader);
+ShaderDecompiler::ProgramResult GenerateFixedGeometryShader(const PicaFixedGSConfig& config,
+                                                            bool separable_shader);
 
 /**
  * Generates the GLSL fragment shader program source code for the current Pica state
@@ -252,35 +231,29 @@ std::optional<std::string> GenerateGeometryShader(const Pica::Shader::ShaderSetu
  * @param separable_shader generates shader that can be used for separate shader object
  * @returns String of the shader source code
  */
-std::string GenerateFragmentShader(const PicaFSConfig& config, bool separable_shader);
+ShaderDecompiler::ProgramResult GenerateFragmentShader(const PicaFSConfig& config,
+                                                       bool separable_shader);
 
 } // namespace OpenGL
 
 namespace std {
 template <>
 struct hash<OpenGL::PicaFSConfig> {
-    std::size_t operator()(const OpenGL::PicaFSConfig& k) const {
+    std::size_t operator()(const OpenGL::PicaFSConfig& k) const noexcept {
         return k.Hash();
     }
 };
 
 template <>
 struct hash<OpenGL::PicaVSConfig> {
-    std::size_t operator()(const OpenGL::PicaVSConfig& k) const {
+    std::size_t operator()(const OpenGL::PicaVSConfig& k) const noexcept {
         return k.Hash();
     }
 };
 
 template <>
 struct hash<OpenGL::PicaFixedGSConfig> {
-    std::size_t operator()(const OpenGL::PicaFixedGSConfig& k) const {
-        return k.Hash();
-    }
-};
-
-template <>
-struct hash<OpenGL::PicaGSConfig> {
-    std::size_t operator()(const OpenGL::PicaGSConfig& k) const {
+    std::size_t operator()(const OpenGL::PicaFixedGSConfig& k) const noexcept {
         return k.Hash();
     }
 };

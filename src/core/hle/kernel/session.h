@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <memory>
+#include <boost/serialization/access.hpp>
 #include "core/hle/kernel/object.h"
 
 namespace Kernel {
@@ -20,8 +22,13 @@ class ServerSession;
  */
 class Session final {
 public:
-    ClientSession* client = nullptr; ///< The client endpoint of the session.
-    ServerSession* server = nullptr; ///< The server endpoint of the session.
-    SharedPtr<ClientPort> port;      ///< The port that this session is associated with (optional).
+    ClientSession* client = nullptr;  ///< The client endpoint of the session.
+    ServerSession* server = nullptr;  ///< The server endpoint of the session.
+    std::shared_ptr<ClientPort> port; ///< The port that this session is associated with (optional).
+
+private:
+    friend class boost::serialization::access;
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int file_version);
 };
 } // namespace Kernel

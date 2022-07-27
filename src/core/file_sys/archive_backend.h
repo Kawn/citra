@@ -8,9 +8,12 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <boost/serialization/string.hpp>
+#include <boost/serialization/vector.hpp>
 #include "common/bit_field.h"
 #include "common/common_types.h"
 #include "common/swap.h"
+#include "core/file_sys/delay_generator.h"
 #include "core/hle/result.h"
 
 namespace FileSys {
@@ -39,7 +42,10 @@ public:
     Path() : type(LowPathType::Invalid) {}
     Path(const char* path) : type(LowPathType::Char), string(path) {}
     Path(std::vector<u8> binary_data) : type(LowPathType::Binary), binary(std::move(binary_data)) {}
-    Path(LowPathType type, const std::vector<u8>& data);
+    template <std::size_t size>
+    Path(const std::array<u8, size>& binary_data)
+        : type(LowPathType::Binary), binary(binary_data.begin(), binary_data.end()) {}
+    Path(LowPathType type, std::vector<u8> data);
 
     LowPathType GetType() const {
         return type;
@@ -60,6 +66,32 @@ private:
     std::vector<u8> binary;
     std::string string;
     std::u16string u16str;
+
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int) {
+        ar& type;
+        switch (type) {
+        case LowPathType::Binary:
+            ar& binary;
+            break;
+        case LowPathType::Char:
+            ar& string;
+            break;
+        case LowPathType::Wchar: {
+            std::vector<char16_t> data;
+            if (Archive::is_saving::value) {
+                std::copy(u16str.begin(), u16str.end(), std::back_inserter(data));
+            }
+            ar& data;
+            if (Archive::is_loading::value) {
+                u16str = std::u16string(data.data(), data.size());
+            }
+        } break;
+        default:
+            break;
+        }
+    }
+    friend class boost::serialization::access;
 };
 
 /// Parameters of the archive, as specified in the Create or Format call.
@@ -153,6 +185,25 @@ public:
      * @return The number of free bytes in the archive
      */
     virtual u64 GetFreeBytes() const = 0;
+
+    u64 GetOpenDelayNs() {
+        if (delay_generator != nullptr) {
+            return delay_generator->GetOpenDelayNs();
+        }
+        LOG_ERROR(Service_FS, "Delay generator was not initalized. Using default");
+        delay_generator = std::make_unique<DefaultDelayGenerator>();
+        return delay_generator->GetOpenDelayNs();
+    }
+
+protected:
+    std::unique_ptr<DelayGenerator> delay_generator;
+
+private:
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int) {
+        ar& delay_generator;
+    }
+    friend class boost::serialization::access;
 };
 
 class ArchiveFactory : NonCopyable {
@@ -189,6 +240,10 @@ public:
      * @return Format information about the archive or error code
      */
     virtual ResultVal<ArchiveFormatInfo> GetFormatInfo(const Path& path, u64 program_id) const = 0;
+
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int) {}
+    friend class boost::serialization::access;
 };
 
 } // namespace FileSys

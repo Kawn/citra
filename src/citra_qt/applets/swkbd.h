@@ -48,10 +48,12 @@ class QtKeyboard final : public QObject, public Frontend::SoftwareKeyboard {
 
 public:
     explicit QtKeyboard(QWidget& parent);
-    void Setup(const Frontend::KeyboardConfig* config) override;
+    void Execute(const Frontend::KeyboardConfig& config) override;
+    void ShowError(const std::string& error) override;
 
 private:
     Q_INVOKABLE void OpenInputDialog();
+    Q_INVOKABLE void ShowErrorDialog(QString message);
 
     /// Index of the buttons
     u8 ok_id;
@@ -59,6 +61,9 @@ private:
     static constexpr u8 cancel_id = 0;
 
     QWidget& parent;
+
+    std::string result_text;
+    int result_button;
 
     friend class QtKeyboardDialog;
     friend class QtKeyboardValidator;

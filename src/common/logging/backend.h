@@ -14,8 +14,6 @@
 
 namespace Log {
 
-class Filter;
-
 /**
  * A log entry. Log entries are store in a structured format to permit more varied output
  * formatting on different frontends, as well as facilitating filtering and aggregation.
@@ -24,7 +22,7 @@ struct Entry {
     std::chrono::microseconds timestamp;
     Class log_class;
     Level log_level;
-    std::string filename;
+    const char* filename;
     unsigned int line_num;
     std::string function;
     std::string message;
@@ -75,6 +73,21 @@ class ColorConsoleBackend : public Backend {
 public:
     static const char* Name() {
         return "color_console";
+    }
+
+    const char* GetName() const override {
+        return Name();
+    }
+    void Write(const Entry& entry) override;
+};
+
+/**
+ * Backend that writes to the Android logcat
+ */
+class LogcatBackend : public Backend {
+public:
+    static const char* Name() {
+        return "logcat";
     }
 
     const char* GetName() const override {
@@ -136,14 +149,4 @@ const char* GetLogClassName(Class log_class);
  */
 const char* GetLevelName(Level log_level);
 
-/// Creates a log entry by formatting the given source location, and message.
-Entry CreateEntry(Class log_class, Level log_level, const char* filename, unsigned int line_nr,
-                  const char* function, std::string message);
-
-/**
- * The global filter will prevent any messages from even being processed if they are filtered. Each
- * backend can have a filter, but if the level is lower than the global filter, the backend will
- * never get the message
- */
-void SetGlobalFilter(const Filter& filter);
 } // namespace Log

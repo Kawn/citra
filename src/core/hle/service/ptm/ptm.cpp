@@ -3,6 +3,7 @@
 // Refer to the license.txt file included.
 
 #include <cinttypes>
+#include "common/archives.h"
 #include "common/common_paths.h"
 #include "common/file_util.h"
 #include "common/logging/log.h"
@@ -18,13 +19,12 @@
 #include "core/hle/service/ptm/ptm_u.h"
 #include "core/settings.h"
 
+SERIALIZE_EXPORT_IMPL(Service::PTM::Module)
+
 namespace Service::PTM {
 
 /// Values for the default gamecoin.dat file
 static const GameCoin default_game_coin = {0x4F00, 42, 0, 0, 0, 2014, 12, 29};
-
-/// Id of the SharedExtData archive used by the PTM process
-static const std::vector<u8> ptm_shared_extdata_id = {0, 0, 0, 0, 0x0B, 0, 0, 0xF0, 0, 0, 0, 0};
 
 void Module::Interface::GetAdapterState(Kernel::HLERequestContext& ctx) {
     IPC::RequestParser rp(ctx, 0x5, 0, 0);
@@ -120,15 +120,10 @@ void Module::Interface::GetSoftwareClosedFlag(Kernel::HLERequestContext& ctx) {
 void CheckNew3DS(IPC::RequestBuilder& rb) {
     const bool is_new_3ds = Settings::values.is_new_3ds;
 
-    if (is_new_3ds) {
-        LOG_CRITICAL(Service_PTM, "The option 'is_new_3ds' is enabled as part of the 'System' "
-                                  "settings. Citra does not fully support New 3DS emulation yet!");
-    }
-
     rb.Push(RESULT_SUCCESS);
     rb.Push(is_new_3ds);
 
-    LOG_WARNING(Service_PTM, "(STUBBED) called isNew3DS = 0x{:08x}", static_cast<u32>(is_new_3ds));
+    LOG_DEBUG(Service_PTM, "called isNew3DS = 0x{:08x}", static_cast<u32>(is_new_3ds));
 }
 
 void Module::Interface::CheckNew3DS(Kernel::HLERequestContext& ctx) {
@@ -139,7 +134,7 @@ void Module::Interface::CheckNew3DS(Kernel::HLERequestContext& ctx) {
 }
 
 static void WriteGameCoinData(GameCoin gamecoin_data) {
-    std::string nand_directory = FileUtil::GetUserPath(FileUtil::UserPath::NANDDir);
+    const std::string& nand_directory = FileUtil::GetUserPath(FileUtil::UserPath::NANDDir);
     FileSys::ArchiveFactory_ExtSaveData extdata_archive_factory(nand_directory, true);
 
     FileSys::Path archive_path(ptm_shared_extdata_id);
@@ -172,7 +167,7 @@ static void WriteGameCoinData(GameCoin gamecoin_data) {
 }
 
 static GameCoin ReadGameCoinData() {
-    std::string nand_directory = FileUtil::GetUserPath(FileUtil::UserPath::NANDDir);
+    const std::string& nand_directory = FileUtil::GetUserPath(FileUtil::UserPath::NANDDir);
     FileSys::ArchiveFactory_ExtSaveData extdata_archive_factory(nand_directory, true);
 
     FileSys::Path archive_path(ptm_shared_extdata_id);
@@ -191,7 +186,7 @@ static GameCoin ReadGameCoinData() {
         LOG_ERROR(Service_PTM, "Could not open the game coin data file!");
         return default_game_coin;
     }
-    u16 result;
+
     auto gamecoin = std::move(gamecoin_result).Unwrap();
     GameCoin gamecoin_data;
     gamecoin->Read(0, sizeof(GameCoin), reinterpret_cast<u8*>(&gamecoin_data));
@@ -202,10 +197,10 @@ static GameCoin ReadGameCoinData() {
 Module::Module() {
     // Open the SharedExtSaveData archive 0xF000000B and create the gamecoin.dat file if it doesn't
     // exist
-    std::string nand_directory = FileUtil::GetUserPath(FileUtil::UserPath::NANDDir);
+    const std::string& nand_directory = FileUtil::GetUserPath(FileUtil::UserPath::NANDDir);
     FileSys::ArchiveFactory_ExtSaveData extdata_archive_factory(nand_directory, true);
-    FileSys::Path archive_path(ptm_shared_extdata_id);
-    auto archive_result = extdata_archive_factory.Open(archive_path, 0);
+    const FileSys::Path archive_path(ptm_shared_extdata_id);
+    const auto archive_result = extdata_archive_factory.Open(archive_path, 0);
     // If the archive didn't exist, write the default game coin file
     if (archive_result.Code() == FileSys::ERR_NOT_FORMATTED) {
         WriteGameCoinData(default_game_coin);

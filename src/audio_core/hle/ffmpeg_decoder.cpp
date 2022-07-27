@@ -12,6 +12,9 @@ public:
     explicit Impl(Memory::MemorySystem& memory);
     ~Impl();
     std::optional<BinaryResponse> ProcessRequest(const BinaryRequest& request);
+    bool IsValid() const {
+        return have_ffmpeg_dl;
+    }
 
 private:
     std::optional<BinaryResponse> Initalize(const BinaryRequest& request);
@@ -49,7 +52,7 @@ private:
 
     Memory::MemorySystem& memory;
 
-    AVCodec* codec;
+    const AVCodec* codec;
     std::unique_ptr<AVCodecContext, AVCodecContextDeleter> av_context;
     std::unique_ptr<AVCodecParserContext, AVCodecParserContextDeleter> parser;
     std::unique_ptr<AVPacket, AVPacketDeleter> av_packet;
@@ -208,6 +211,7 @@ std::optional<BinaryResponse> FFMPEGDecoder::Impl::Decode(const BinaryRequest& r
 
                 std::size_t size = bytes_per_sample * (decoded_frame->nb_samples);
 
+                response.sample_rate = GetSampleRateEnum(decoded_frame->sample_rate);
                 response.num_channels = decoded_frame->channels;
                 response.num_samples += decoded_frame->nb_samples;
 
@@ -218,6 +222,7 @@ std::optional<BinaryResponse> FFMPEGDecoder::Impl::Decode(const BinaryRequest& r
                     for (std::size_t channel(0); channel < decoded_frame->channels; channel++) {
                         std::memcpy(&val_float, decoded_frame->data[channel] + current_pos,
                                     sizeof(val_float));
+                        val_float = std::clamp(val_float, -1.0f, 1.0f);
                         s16 val = static_cast<s16>(0x7FFF * val_float);
                         out_streams[channel].push_back(val & 0xFF);
                         out_streams[channel].push_back(val >> 8);
@@ -258,6 +263,10 @@ FFMPEGDecoder::~FFMPEGDecoder() = default;
 
 std::optional<BinaryResponse> FFMPEGDecoder::ProcessRequest(const BinaryRequest& request) {
     return impl->ProcessRequest(request);
+}
+
+bool FFMPEGDecoder::IsValid() const {
+    return impl->IsValid();
 }
 
 } // namespace AudioCore::HLE

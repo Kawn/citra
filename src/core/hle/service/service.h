@@ -7,9 +7,13 @@
 #include <array>
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <string>
 #include <boost/container/flat_map.hpp>
+#include <boost/serialization/base_object.hpp>
+#include <boost/serialization/shared_ptr.hpp>
 #include "common/common_types.h"
+#include "common/construct.h"
 #include "core/hle/kernel/hle_ipc.h"
 #include "core/hle/kernel/object.h"
 #include "core/hle/service/sm/sm.h"
@@ -63,6 +67,9 @@ public:
 
     void HandleSyncRequest(Kernel::HLERequestContext& context) override;
 
+    /// Retrieves name of a function based on the header code. For IPC Recorder.
+    std::string GetFunctionName(u32 header) const;
+
 protected:
     /// Member-function pointer type of SyncRequest handlers.
     template <typename Self>
@@ -81,8 +88,9 @@ private:
     using InvokerFn = void(ServiceFrameworkBase* object, HandlerFnP<ServiceFrameworkBase> member,
                            Kernel::HLERequestContext& ctx);
 
+    // TODO: Replace all these with virtual functions!
     ServiceFrameworkBase(const char* service_name, u32 max_sessions, InvokerFn* handler_invoker);
-    ~ServiceFrameworkBase();
+    ~ServiceFrameworkBase() override;
 
     void RegisterHandlersBase(const FunctionInfoBase* functions, std::size_t n);
     void ReportUnimplementedFunction(u32* cmd_buf, const FunctionInfoBase* info);
@@ -91,12 +99,6 @@ private:
     std::string service_name;
     /// Maximum number of concurrent sessions that this service can handle.
     u32 max_sessions;
-
-    /**
-     * Port where incoming connections will be received. Only created when InstallAsService() or
-     * InstallAsNamedPort() are called.
-     */
-    Kernel::SharedPtr<Kernel::ServerPort> port;
 
     /// Function used to safely up-cast pointers to the derived class before invoking a handler.
     InvokerFn* handler_invoker;
@@ -161,11 +163,11 @@ protected:
         RegisterHandlersBase(functions, n);
     }
 
-    std::unique_ptr<SessionDataBase> MakeSessionData() const override {
+    std::unique_ptr<SessionDataBase> MakeSessionData() override {
         return std::make_unique<SessionData>();
     }
 
-    SessionData* GetSessionData(Kernel::SharedPtr<Kernel::ServerSession> server_session) {
+    SessionData* GetSessionData(std::shared_ptr<Kernel::ServerSession> server_session) {
         return ServiceFrameworkBase::GetSessionData<SessionData>(server_session);
     }
 
@@ -195,3 +197,45 @@ struct ServiceModuleInfo {
 extern const std::array<ServiceModuleInfo, 40> service_module_map;
 
 } // namespace Service
+
+#define SERVICE_SERIALIZATION(T, MFIELD, TMODULE)                                                  \
+    template <class Archive>                                                                       \
+    void save_construct(Archive& ar, const unsigned int file_version) const {                      \
+        ar << MFIELD;                                                                              \
+    }                                                                                              \
+                                                                                                   \
+    template <class Archive>                                                                       \
+    static void load_construct(Archive& ar, T* t, const unsigned int file_version) {               \
+        std::shared_ptr<TMODULE> MFIELD;                                                           \
+        ar >> MFIELD;                                                                              \
+        ::new (t) T(MFIELD);                                                                       \
+    }                                                                                              \
+                                                                                                   \
+    template <class Archive>                                                                       \
+    void serialize(Archive& ar, const unsigned int) {                                              \
+        ar& boost::serialization::base_object<Kernel::SessionRequestHandler>(*this);               \
+    }                                                                                              \
+    friend class boost::serialization::access;                                                     \
+    friend class ::construct_access;
+
+#define SERVICE_SERIALIZATION_SIMPLE                                                               \
+    template <class Archive>                                                                       \
+    void serialize(Archive& ar, const unsigned int) {                                              \
+        ar& boost::serialization::base_object<Kernel::SessionRequestHandler>(*this);               \
+    }                                                                                              \
+    friend class boost::serialization::access;
+
+#define SERVICE_CONSTRUCT(T)                                                                       \
+    namespace boost::serialization {                                                               \
+    template <class Archive>                                                                       \
+    void load_construct_data(Archive& ar, T* t, const unsigned int);                               \
+    }
+
+#define SERVICE_CONSTRUCT_IMPL(T)                                                                  \
+    namespace boost::serialization {                                                               \
+    template <class Archive>                                                                       \
+    void load_construct_data(Archive& ar, T* t, const unsigned int) {                              \
+        ::new (t) T(Core::Global<Core::System>());                                                 \
+    }                                                                                              \
+    template void load_construct_data<iarchive>(iarchive & ar, T* t, const unsigned int);          \
+    }

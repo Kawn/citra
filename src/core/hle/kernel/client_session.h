@@ -6,6 +6,10 @@
 
 #include <memory>
 #include <string>
+#include <boost/serialization/base_object.hpp>
+#include <boost/serialization/export.hpp>
+#include <boost/serialization/shared_ptr.hpp>
+#include <boost/serialization/string.hpp>
 #include "common/common_types.h"
 #include "core/hle/kernel/object.h"
 #include "core/hle/result.h"
@@ -17,6 +21,9 @@ class Thread;
 
 class ClientSession final : public Object {
 public:
+    explicit ClientSession(KernelSystem& kernel);
+    ~ClientSession() override;
+
     friend class KernelSystem;
 
     std::string GetTypeName() const override {
@@ -27,7 +34,7 @@ public:
         return name;
     }
 
-    static const HandleType HANDLE_TYPE = HandleType::ClientSession;
+    static constexpr HandleType HANDLE_TYPE = HandleType::ClientSession;
     HandleType GetHandleType() const override {
         return HANDLE_TYPE;
     }
@@ -37,7 +44,7 @@ public:
      * @param thread Thread that initiated the request.
      * @return ResultCode of the operation.
      */
-    ResultCode SendSyncRequest(SharedPtr<Thread> thread);
+    ResultCode SendSyncRequest(std::shared_ptr<Thread> thread);
 
     std::string name; ///< Name of client port (optional)
 
@@ -45,8 +52,16 @@ public:
     std::shared_ptr<Session> parent;
 
 private:
-    explicit ClientSession(KernelSystem& kernel);
-    ~ClientSession() override;
+    friend class boost::serialization::access;
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int file_version) {
+        ar& boost::serialization::base_object<Object>(*this);
+        ar& name;
+        ar& parent;
+    }
 };
 
 } // namespace Kernel
+
+BOOST_CLASS_EXPORT_KEY(Kernel::ClientSession)
+CONSTRUCT_KERNEL_OBJECT(Kernel::ClientSession)

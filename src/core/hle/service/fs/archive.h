@@ -8,7 +8,8 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
-#include <boost/container/flat_map.hpp>
+#include <boost/serialization/unique_ptr.hpp>
+#include <boost/serialization/unordered_map.hpp>
 #include "common/common_types.h"
 #include "core/file_sys/archive_backend.h"
 #include "core/hle/result.h"
@@ -47,7 +48,23 @@ enum class ArchiveIdCode : u32 {
 /// Media types for the archives
 enum class MediaType : u32 { NAND = 0, SDMC = 1, GameCard = 2 };
 
+MediaType GetMediaTypeFromPath(std::string_view path);
+
+enum class SpecialContentType : u8 {
+    Update = 1,
+    Manual = 2,
+    DLPChild = 3,
+};
+
 typedef u64 ArchiveHandle;
+
+struct ArchiveResource {
+    u32 sector_size_in_bytes;
+    u32 cluster_size_in_bytes;
+    u32 partition_capacity_in_clusters;
+    u32 free_space_in_clusters;
+};
+static_assert(sizeof(ArchiveResource) == 0x10, "ArchiveResource has incorrect size");
 
 using FileSys::ArchiveBackend;
 using FileSys::ArchiveFactory;
@@ -63,7 +80,7 @@ public:
      * @param program_id the program ID of the client that requests the operation
      * @return Handle to the opened archive
      */
-    ResultVal<ArchiveHandle> OpenArchive(ArchiveIdCode id_code, FileSys::Path& archive_path,
+    ResultVal<ArchiveHandle> OpenArchive(ArchiveIdCode id_code, const FileSys::Path& archive_path,
                                          u64 program_id);
 
     /**
@@ -77,11 +94,10 @@ public:
      * @param archive_handle Handle to an open Archive object
      * @param path Path to the File inside of the Archive
      * @param mode Mode under which to open the File
-     * @return The opened File object
+     * @return Pair containing the opened File object and the open delay
      */
-    ResultVal<std::shared_ptr<File>> OpenFileFromArchive(ArchiveHandle archive_handle,
-                                                         const FileSys::Path& path,
-                                                         const FileSys::Mode mode);
+    std::pair<ResultVal<std::shared_ptr<File>>, std::chrono::nanoseconds> OpenFileFromArchive(
+        ArchiveHandle archive_handle, const FileSys::Path& path, FileSys::Mode mode);
 
     /**
      * Delete a File from an Archive
@@ -189,7 +205,7 @@ public:
      * @return The format info of the archive, or the corresponding error code if failed.
      */
     ResultVal<FileSys::ArchiveFormatInfo> GetArchiveFormatInfo(ArchiveIdCode id_code,
-                                                               FileSys::Path& archive_path,
+                                                               const FileSys::Path& archive_path,
                                                                u64 program_id);
 
     /**
@@ -231,6 +247,13 @@ public:
      */
     ResultCode CreateSystemSaveData(u32 high, u32 low);
 
+    /**
+     * Returns capacity and free space information about the given media type.
+     * @param media_type The media type to obtain the information about.
+     * @return The capacity information of the media type, or an error code if failed.
+     */
+    ResultVal<ArchiveResource> GetArchiveResource(MediaType media_type) const;
+
     /// Registers a new NCCH file with the SelfNCCH archive factory
     void RegisterSelfNCCH(Loader::AppLoader& app_loader);
 
@@ -254,13 +277,21 @@ private:
      * Map of registered archives, identified by id code. Once an archive is registered here, it is
      * never removed until UnregisterArchiveTypes is called.
      */
-    boost::container::flat_map<ArchiveIdCode, std::unique_ptr<ArchiveFactory>> id_code_map;
+    std::unordered_map<ArchiveIdCode, std::unique_ptr<ArchiveFactory>> id_code_map;
 
     /**
      * Map of active archive handles to archive objects
      */
     std::unordered_map<ArchiveHandle, std::unique_ptr<ArchiveBackend>> handle_map;
     ArchiveHandle next_handle = 1;
+
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int) {
+        ar& id_code_map;
+        ar& handle_map;
+        ar& next_handle;
+    }
+    friend class boost::serialization::access;
 };
 
 } // namespace Service::FS

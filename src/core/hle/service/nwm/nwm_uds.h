@@ -10,13 +10,14 @@
 #include <deque>
 #include <list>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
 #include <boost/optional.hpp>
+#include <boost/serialization/export.hpp>
 #include "common/common_types.h"
 #include "common/swap.h"
-#include "core/hle/kernel/kernel.h"
 #include "core/hle/service/service.h"
 #include "network/network.h"
 
@@ -72,9 +73,15 @@ enum class NetworkStatus {
     ConnectedAsSpectator = 10,
 };
 
+enum class DisconnectStatus {
+    Connected = 1,
+    NotConnected = 2,
+    // TODO(B3N30): Figure out the other values
+};
+
 struct ConnectionStatus {
     u32_le status;
-    INSERT_PADDING_WORDS(1);
+    u32_le disconnect_reason;
     u16_le network_node_id;
     u16_le changed_nodes;
     u16_le nodes[UDSMaxNodes];
@@ -126,6 +133,8 @@ class NWM_UDS final : public ServiceFramework<NWM_UDS> {
 public:
     explicit NWM_UDS(Core::System& system);
     ~NWM_UDS();
+
+    class ThreadCallback;
 
 private:
     Core::System& system;
@@ -225,6 +234,18 @@ private:
      *      2 : Channel of the current WiFi network connection.
      */
     void SetApplicationData(Kernel::HLERequestContext& ctx);
+
+    /**
+     * NWM_UDS::GetApplicationData service function.
+     * Loads the application data from the current beacon.
+     *  Inputs:
+     *      1 : Data size.
+     *  Outputs:
+     *      0 : Return header
+     *      1 : Result of function, always 0
+     *      2 : Actual data size
+     */
+    void GetApplicationData(Kernel::HLERequestContext& ctx);
 
     /**
      * NWM_UDS::Bind service function.
@@ -395,6 +416,17 @@ private:
     void ConnectToNetworkDeprecated(Kernel::HLERequestContext& ctx);
 
     /**
+     * NWM_UDS::EjectClient Disconnects clients.
+     *  Inputs:
+     *      0 : Command header
+     *      1 : Network node id
+     *  Outputs:
+     *      0 : Return header
+     *      1 : Result of function, 0 on success, otherwise error code
+     */
+    void EjectClient(Kernel::HLERequestContext& ctx);
+
+    /**
      * NWM_UDS::DecryptBeaconData service function.
      * Decrypts the encrypted data tags contained in the 802.11 beacons.
      *  Inputs:
@@ -416,9 +448,9 @@ private:
     template <u16 command_id>
     void DecryptBeaconData(Kernel::HLERequestContext& ctx);
 
-    ResultVal<Kernel::SharedPtr<Kernel::Event>> Initialize(
+    ResultVal<std::shared_ptr<Kernel::Event>> Initialize(
         u32 sharedmem_size, const NodeInfo& node, u16 version,
-        Kernel::SharedPtr<Kernel::SharedMemory> sharedmem);
+        std::shared_ptr<Kernel::SharedMemory> sharedmem);
 
     ResultCode BeginHostingNetwork(const u8* network_info_buffer, std::size_t network_info_size,
                                    std::vector<u8> passphrase);
@@ -477,11 +509,11 @@ private:
     boost::optional<Network::MacAddress> GetNodeMacAddress(u16 dest_node_id, u8 flags);
 
     // Event that is signaled every time the connection status changes.
-    Kernel::SharedPtr<Kernel::Event> connection_status_event;
+    std::shared_ptr<Kernel::Event> connection_status_event;
 
     // Shared memory provided by the application to store the receive buffer.
     // This is not currently used.
-    Kernel::SharedPtr<Kernel::SharedMemory> recv_buffer_memory;
+    std::shared_ptr<Kernel::SharedMemory> recv_buffer_memory;
 
     // Connection status of this 3DS.
     ConnectionStatus connection_status{};
@@ -503,7 +535,7 @@ private:
         u8 channel;          ///< Channel that this bind node was bound to.
         u16 network_node_id; ///< Node id this bind node is associated with, only packets from this
                              /// network node will be received.
-        Kernel::SharedPtr<Kernel::Event> event;       ///< Receive event for this bind node.
+        std::shared_ptr<Kernel::Event> event;         ///< Receive event for this bind node.
         std::deque<std::vector<u8>> received_packets; ///< List of packets received on this channel.
     };
 
@@ -521,6 +553,14 @@ private:
     struct Node {
         bool connected;
         u16 node_id;
+
+    private:
+        template <class Archive>
+        void serialize(Archive& ar, const unsigned int) {
+            ar& connected;
+            ar& node_id;
+        }
+        friend class boost::serialization::access;
     };
 
     std::map<MacAddress, Node> node_map;
@@ -535,7 +575,7 @@ private:
     // network thread.
     std::mutex connection_status_mutex;
 
-    Kernel::SharedPtr<Kernel::Event> connection_event;
+    std::shared_ptr<Kernel::Event> connection_event;
 
     // Mutex to synchronize access to the list of received beacons between the emulation thread and
     // the network thread.
@@ -543,6 +583,14 @@ private:
 
     // List of the last <MaxBeaconFrames> beacons received from the network.
     std::list<Network::WifiPacket> received_beacons;
+
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int);
+    friend class boost::serialization::access;
 };
 
 } // namespace Service::NWM
+
+SERVICE_CONSTRUCT(Service::NWM::NWM_UDS)
+BOOST_CLASS_EXPORT_KEY(Service::NWM::NWM_UDS)
+BOOST_CLASS_EXPORT_KEY(Service::NWM::NWM_UDS::ThreadCallback)

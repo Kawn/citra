@@ -3,8 +3,10 @@
 // Refer to the license.txt file included.
 
 #include <algorithm>
+#include "common/archives.h"
 #include "common/common_types.h"
 #include "common/logging/log.h"
+#include "core/global.h"
 #include "core/hle/kernel/address_arbiter.h"
 #include "core/hle/kernel/errors.h"
 #include "core/hle/kernel/kernel.h"
@@ -16,7 +18,7 @@
 
 namespace Kernel {
 
-void AddressArbiter::WaitThread(SharedPtr<Thread> thread, VAddr wait_address) {
+void AddressArbiter::WaitThread(std::shared_ptr<Thread> thread, VAddr wait_address) {
     thread->wait_address = wait_address;
     thread->status = ThreadStatus::WaitArb;
     waiting_threads.emplace_back(std::move(thread));
@@ -38,7 +40,7 @@ void AddressArbiter::ResumeAllThreads(VAddr address) {
     waiting_threads.erase(itr, waiting_threads.end());
 }
 
-SharedPtr<Thread> AddressArbiter::ResumeHighestPriorityThread(VAddr address) {
+std::shared_ptr<Thread> AddressArbiter::ResumeHighestPriorityThread(VAddr address) {
     // Determine which threads are waiting on this address, those should be considered for wakeup.
     auto matches_start = std::stable_partition(
         waiting_threads.begin(), waiting_threads.end(), [address](const auto& thread) {
@@ -65,28 +67,46 @@ SharedPtr<Thread> AddressArbiter::ResumeHighestPriorityThread(VAddr address) {
     return thread;
 }
 
-AddressArbiter::AddressArbiter(KernelSystem& kernel) : Object(kernel), kernel(kernel) {}
+AddressArbiter::AddressArbiter(KernelSystem& kernel)
+    : Object(kernel), kernel(kernel), timeout_callback(std::make_shared<Callback>(*this)) {}
 AddressArbiter::~AddressArbiter() {}
 
-SharedPtr<AddressArbiter> KernelSystem::CreateAddressArbiter(std::string name) {
-    SharedPtr<AddressArbiter> address_arbiter(new AddressArbiter(*this));
+std::shared_ptr<AddressArbiter> KernelSystem::CreateAddressArbiter(std::string name) {
+    auto address_arbiter{std::make_shared<AddressArbiter>(*this)};
 
     address_arbiter->name = std::move(name);
 
     return address_arbiter;
 }
 
-ResultCode AddressArbiter::ArbitrateAddress(SharedPtr<Thread> thread, ArbitrationType type,
+class AddressArbiter::Callback : public WakeupCallback {
+public:
+    explicit Callback(AddressArbiter& _parent) : parent(_parent) {}
+    AddressArbiter& parent;
+
+    void WakeUp(ThreadWakeupReason reason, std::shared_ptr<Thread> thread,
+                std::shared_ptr<WaitObject> object) override {
+        parent.WakeUp(reason, std::move(thread), std::move(object));
+    }
+
+private:
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int) {
+        ar& boost::serialization::base_object<WakeupCallback>(*this);
+    }
+    friend class boost::serialization::access;
+};
+
+void AddressArbiter::WakeUp(ThreadWakeupReason reason, std::shared_ptr<Thread> thread,
+                            std::shared_ptr<WaitObject> object) {
+    ASSERT(reason == ThreadWakeupReason::Timeout);
+    // Remove the newly-awakened thread from the Arbiter's waiting list.
+    waiting_threads.erase(std::remove(waiting_threads.begin(), waiting_threads.end(), thread),
+                          waiting_threads.end());
+};
+
+ResultCode AddressArbiter::ArbitrateAddress(std::shared_ptr<Thread> thread, ArbitrationType type,
                                             VAddr address, s32 value, u64 nanoseconds) {
-
-    auto timeout_callback = [this](ThreadWakeupReason reason, SharedPtr<Thread> thread,
-                                   SharedPtr<WaitObject> object) {
-        ASSERT(reason == ThreadWakeupReason::Timeout);
-        // Remove the newly-awakened thread from the Arbiter's waiting list.
-        waiting_threads.erase(std::remove(waiting_threads.begin(), waiting_threads.end(), thread),
-                              waiting_threads.end());
-    };
-
     switch (type) {
 
     // Signal thread(s) waiting for arbitrate address...
@@ -136,7 +156,7 @@ ResultCode AddressArbiter::ArbitrateAddress(SharedPtr<Thread> thread, Arbitratio
     }
 
     default:
-        LOG_ERROR(Kernel, "unknown type={}", static_cast<u32>(type));
+        LOG_ERROR(Kernel, "unknown type={}", type);
         return ERR_INVALID_ENUM_VALUE_FND;
     }
 
@@ -151,3 +171,23 @@ ResultCode AddressArbiter::ArbitrateAddress(SharedPtr<Thread> thread, Arbitratio
 }
 
 } // namespace Kernel
+
+namespace boost::serialization {
+
+template <class Archive>
+void save_construct_data(Archive& ar, const Kernel::AddressArbiter::Callback* t,
+                         const unsigned int) {
+    ar << Kernel::SharedFrom(&t->parent);
+}
+
+template <class Archive>
+void load_construct_data(Archive& ar, Kernel::AddressArbiter::Callback* t, const unsigned int) {
+    std::shared_ptr<Kernel::AddressArbiter> parent;
+    ar >> parent;
+    ::new (t) Kernel::AddressArbiter::Callback(*parent);
+}
+
+} // namespace boost::serialization
+
+SERIALIZE_EXPORT_IMPL(Kernel::AddressArbiter)
+SERIALIZE_EXPORT_IMPL(Kernel::AddressArbiter::Callback)

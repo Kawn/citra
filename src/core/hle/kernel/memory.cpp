@@ -19,6 +19,7 @@
 #include "core/hle/kernel/vm_manager.h"
 #include "core/hle/result.h"
 #include "core/memory.h"
+#include "core/settings.h"
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -40,43 +41,62 @@ static const u32 memory_region_sizes[8][3] = {
     {0x0B200000, 0x02E00000, 0x02000000}, // 7
 };
 
-void KernelSystem::MemoryInit(u32 mem_type) {
-    // TODO(yuriks): On the n3DS, all o3DS configurations (<=5) are forced to 6 instead.
-    ASSERT_MSG(mem_type <= 5, "New 3DS memory configuration aren't supported yet!");
+namespace MemoryMode {
+enum N3DSMode : u8 {
+    Mode6 = 1,
+    Mode7 = 2,
+    Mode6_2 = 3,
+};
+}
+
+void KernelSystem::MemoryInit(u32 mem_type, u8 n3ds_mode) {
     ASSERT(mem_type != 1);
+
+    const bool is_new_3ds = Settings::values.is_new_3ds;
+    u32 reported_mem_type = mem_type;
+    if (is_new_3ds) {
+        if (n3ds_mode == MemoryMode::Mode6 || n3ds_mode == MemoryMode::Mode6_2) {
+            mem_type = 6;
+            reported_mem_type = 6;
+        } else if (n3ds_mode == MemoryMode::Mode7) {
+            mem_type = 7;
+            reported_mem_type = 7;
+        } else {
+            // On the N3ds, all O3ds configurations (<=5) are forced to 6 instead.
+            mem_type = 6;
+        }
+    }
 
     // The kernel allocation regions (APPLICATION, SYSTEM and BASE) are laid out in sequence, with
     // the sizes specified in the memory_region_sizes table.
     VAddr base = 0;
     for (int i = 0; i < 3; ++i) {
-        memory_regions[i].Reset(base, memory_region_sizes[mem_type][i]);
+        memory_regions[i]->Reset(base, memory_region_sizes[mem_type][i]);
 
-        base += memory_regions[i].size;
+        base += memory_regions[i]->size;
     }
 
     // We must've allocated the entire FCRAM by the end
-    ASSERT(base == Memory::FCRAM_SIZE);
+    ASSERT(base == (is_new_3ds ? Memory::FCRAM_N3DS_SIZE : Memory::FCRAM_SIZE));
 
-    config_mem_handler = std::make_unique<ConfigMem::Handler>();
+    config_mem_handler = std::make_shared<ConfigMem::Handler>();
     auto& config_mem = config_mem_handler->GetConfigMem();
-    config_mem.app_mem_type = mem_type;
-    // app_mem_malloc does not always match the configured size for memory_region[0]: in case the
-    // n3DS type override is in effect it reports the size the game expects, not the real one.
-    config_mem.app_mem_alloc = memory_region_sizes[mem_type][0];
-    config_mem.sys_mem_alloc = memory_regions[1].size;
-    config_mem.base_mem_alloc = memory_regions[2].size;
+    config_mem.app_mem_type = reported_mem_type;
+    config_mem.app_mem_alloc = memory_region_sizes[reported_mem_type][0];
+    config_mem.sys_mem_alloc = memory_regions[1]->size;
+    config_mem.base_mem_alloc = memory_regions[2]->size;
 
-    shared_page_handler = std::make_unique<SharedPage::Handler>(timing);
+    shared_page_handler = std::make_shared<SharedPage::Handler>(timing);
 }
 
-MemoryRegionInfo* KernelSystem::GetMemoryRegion(MemoryRegion region) {
+std::shared_ptr<MemoryRegionInfo> KernelSystem::GetMemoryRegion(MemoryRegion region) {
     switch (region) {
     case MemoryRegion::APPLICATION:
-        return &memory_regions[0];
+        return memory_regions[0];
     case MemoryRegion::SYSTEM:
-        return &memory_regions[1];
+        return memory_regions[1];
     case MemoryRegion::BASE:
-        return &memory_regions[2];
+        return memory_regions[2];
     default:
         UNREACHABLE();
     }
@@ -127,7 +147,7 @@ void KernelSystem::HandleSpecialMapping(VMManager& address_space, const AddressM
         return;
     }
 
-    u8* target_pointer = memory.GetPhysicalPointer(area->paddr_base + offset_into_region);
+    auto target_pointer = memory.GetPhysicalRef(area->paddr_base + offset_into_region);
 
     // TODO(yuriks): This flag seems to have some other effect, but it's unknown what
     MemoryState memory_state = mapping.unk_flag ? MemoryState::Static : MemoryState::IO;
@@ -140,24 +160,22 @@ void KernelSystem::HandleSpecialMapping(VMManager& address_space, const AddressM
 }
 
 void KernelSystem::MapSharedPages(VMManager& address_space) {
-    auto cfg_mem_vma =
-        address_space
-            .MapBackingMemory(Memory::CONFIG_MEMORY_VADDR,
-                              reinterpret_cast<u8*>(&config_mem_handler->GetConfigMem()),
-                              Memory::CONFIG_MEMORY_SIZE, MemoryState::Shared)
-            .Unwrap();
+    auto cfg_mem_vma = address_space
+                           .MapBackingMemory(Memory::CONFIG_MEMORY_VADDR, {config_mem_handler},
+                                             Memory::CONFIG_MEMORY_SIZE, MemoryState::Shared)
+                           .Unwrap();
     address_space.Reprotect(cfg_mem_vma, VMAPermission::Read);
 
-    auto shared_page_vma =
-        address_space
-            .MapBackingMemory(Memory::SHARED_PAGE_VADDR,
-                              reinterpret_cast<u8*>(&shared_page_handler->GetSharedPage()),
-                              Memory::SHARED_PAGE_SIZE, MemoryState::Shared)
-            .Unwrap();
+    auto shared_page_vma = address_space
+                               .MapBackingMemory(Memory::SHARED_PAGE_VADDR, {shared_page_handler},
+                                                 Memory::SHARED_PAGE_SIZE, MemoryState::Shared)
+                               .Unwrap();
     address_space.Reprotect(shared_page_vma, VMAPermission::Read);
 }
 
 void MemoryRegionInfo::Reset(u32 base, u32 size) {
+    ASSERT(!is_locked);
+
     this->base = base;
     this->size = size;
     used = 0;
@@ -168,6 +186,8 @@ void MemoryRegionInfo::Reset(u32 base, u32 size) {
 }
 
 MemoryRegionInfo::IntervalSet MemoryRegionInfo::HeapAllocate(u32 size) {
+    ASSERT(!is_locked);
+
     IntervalSet result;
     u32 rest = size;
 
@@ -195,6 +215,8 @@ MemoryRegionInfo::IntervalSet MemoryRegionInfo::HeapAllocate(u32 size) {
 }
 
 bool MemoryRegionInfo::LinearAllocate(u32 offset, u32 size) {
+    ASSERT(!is_locked);
+
     Interval interval(offset, offset + size);
     if (!boost::icl::contains(free_blocks, interval)) {
         // The requested range is already allocated
@@ -206,6 +228,8 @@ bool MemoryRegionInfo::LinearAllocate(u32 offset, u32 size) {
 }
 
 std::optional<u32> MemoryRegionInfo::LinearAllocate(u32 size) {
+    ASSERT(!is_locked);
+
     // Find the first sufficient continuous block from the lower address
     for (const auto& interval : free_blocks) {
         ASSERT(interval.bounds() == boost::icl::interval_bounds::right_open());
@@ -218,14 +242,22 @@ std::optional<u32> MemoryRegionInfo::LinearAllocate(u32 size) {
     }
 
     // No sufficient block found
-    return {};
+    return std::nullopt;
 }
 
 void MemoryRegionInfo::Free(u32 offset, u32 size) {
+    if (is_locked) {
+        return;
+    }
+
     Interval interval(offset, offset + size);
     ASSERT(!boost::icl::intersects(free_blocks, interval)); // must be allocated blocks
     free_blocks += interval;
     used -= size;
+}
+
+void MemoryRegionInfo::Unlock() {
+    is_locked = false;
 }
 
 } // namespace Kernel

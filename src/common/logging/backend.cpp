@@ -26,6 +26,10 @@
 
 namespace Log {
 
+Filter filter;
+void SetGlobalFilter(const Filter& f) {
+    filter = f;
+}
 /**
  * Static state as a singleton.
  */
@@ -39,29 +43,23 @@ public:
     Impl(Impl const&) = delete;
     const Impl& operator=(Impl const&) = delete;
 
-    void PushEntry(Entry e) {
-        message_queue.Push(std::move(e));
+    void PushEntry(Class log_class, Level log_level, const char* filename, unsigned int line_num,
+                   const char* function, std::string message) {
+        message_queue.Push(
+            CreateEntry(log_class, log_level, filename, line_num, function, std::move(message)));
     }
 
     void AddBackend(std::unique_ptr<Backend> backend) {
-        std::lock_guard<std::mutex> lock(writing_mutex);
+        std::lock_guard lock{writing_mutex};
         backends.push_back(std::move(backend));
     }
 
     void RemoveBackend(std::string_view backend_name) {
-        std::lock_guard<std::mutex> lock(writing_mutex);
+        std::lock_guard lock{writing_mutex};
         const auto it =
             std::remove_if(backends.begin(), backends.end(),
                            [&backend_name](const auto& i) { return backend_name == i->GetName(); });
         backends.erase(it, backends.end());
-    }
-
-    const Filter& GetGlobalFilter() const {
-        return filter;
-    }
-
-    void SetGlobalFilter(const Filter& f) {
-        filter = f;
     }
 
     Backend* GetBackend(std::string_view backend_name) {
@@ -78,7 +76,7 @@ private:
         backend_thread = std::thread([&] {
             Entry entry;
             auto write_logs = [&](Entry& e) {
-                std::lock_guard<std::mutex> lock(writing_mutex);
+                std::lock_guard lock{writing_mutex};
                 for (const auto& backend : backends) {
                     backend->Write(e);
                 }
@@ -108,11 +106,30 @@ private:
         backend_thread.join();
     }
 
+    Entry CreateEntry(Class log_class, Level log_level, const char* filename, unsigned int line_nr,
+                      const char* function, std::string message) const {
+        using std::chrono::duration_cast;
+        using std::chrono::steady_clock;
+
+        Entry entry;
+        entry.timestamp =
+            duration_cast<std::chrono::microseconds>(steady_clock::now() - time_origin);
+        entry.log_class = log_class;
+        entry.log_level = log_level;
+        entry.filename = filename;
+        entry.line_num = line_nr;
+        entry.function = function;
+        entry.message = std::move(message);
+
+        return entry;
+    }
+
     std::mutex writing_mutex;
     std::thread backend_thread;
     std::vector<std::unique_ptr<Backend>> backends;
     Common::MPSCQueue<Log::Entry> message_queue;
     Filter filter;
+    std::chrono::steady_clock::time_point time_origin{std::chrono::steady_clock::now()};
 };
 
 void ConsoleBackend::Write(const Entry& entry) {
@@ -123,10 +140,22 @@ void ColorConsoleBackend::Write(const Entry& entry) {
     PrintColoredMessage(entry);
 }
 
-// _SH_DENYWR allows read only access to the file for other programs.
-// It is #defined to 0 on other platforms
-FileBackend::FileBackend(const std::string& filename)
-    : file(filename, "w", _SH_DENYWR), bytes_written(0) {}
+void LogcatBackend::Write(const Entry& entry) {
+    PrintMessageToLogcat(entry);
+}
+
+FileBackend::FileBackend(const std::string& filename) : bytes_written(0) {
+    if (FileUtil::Exists(filename + ".old.txt")) {
+        FileUtil::Delete(filename + ".old.txt");
+    }
+    if (FileUtil::Exists(filename)) {
+        FileUtil::Rename(filename, filename + ".old.txt");
+    }
+
+    // _SH_DENYWR allows read only access to the file for other programs.
+    // It is #defined to 0 on other platforms
+    file = FileUtil::IOFile(filename, "w", _SH_DENYWR);
+}
 
 void FileBackend::Write(const Entry& entry) {
     // prevent logs from going over the maximum size (in case its spamming and the user doesn't
@@ -196,6 +225,7 @@ void DebuggerBackend::Write(const Entry& entry) {
     SUB(Service, SOC)                                                                              \
     SUB(Service, IR)                                                                               \
     SUB(Service, Y2R)                                                                              \
+    SUB(Service, PS)                                                                               \
     CLS(HW)                                                                                        \
     SUB(HW, Memory)                                                                                \
     SUB(HW, LCD)                                                                                   \
@@ -228,8 +258,10 @@ const char* GetLogClassName(Class log_class) {
 #undef CLS
 #undef SUB
     case Class::Count:
-        UNREACHABLE();
+        break;
     }
+    UNREACHABLE();
+    return "Invalid";
 }
 
 const char* GetLevelName(Level log_level) {
@@ -244,34 +276,11 @@ const char* GetLevelName(Level log_level) {
         LVL(Error);
         LVL(Critical);
     case Level::Count:
-        UNREACHABLE();
+        break;
     }
 #undef LVL
-}
-
-Entry CreateEntry(Class log_class, Level log_level, const char* filename, unsigned int line_nr,
-                  const char* function, std::string message) {
-    using std::chrono::duration_cast;
-    using std::chrono::steady_clock;
-
-    // matches from the beginning up to the last '../' or 'src/'
-    static const std::regex trim_source_path(R"(.*([\/\\]|^)((\.\.)|(src))[\/\\])");
-    static steady_clock::time_point time_origin = steady_clock::now();
-
-    Entry entry;
-    entry.timestamp = duration_cast<std::chrono::microseconds>(steady_clock::now() - time_origin);
-    entry.log_class = log_class;
-    entry.log_level = log_level;
-    entry.filename = std::regex_replace(filename, trim_source_path, "");
-    entry.line_num = line_nr;
-    entry.function = function;
-    entry.message = std::move(message);
-
-    return entry;
-}
-
-void SetGlobalFilter(const Filter& filter) {
-    Impl::Instance().SetGlobalFilter(filter);
+    UNREACHABLE();
+    return "Invalid";
 }
 
 void AddBackend(std::unique_ptr<Backend> backend) {
@@ -290,13 +299,7 @@ void FmtLogMessageImpl(Class log_class, Level log_level, const char* filename,
                        unsigned int line_num, const char* function, const char* format,
                        const fmt::format_args& args) {
     auto& instance = Impl::Instance();
-    const auto& filter = instance.GetGlobalFilter();
-    if (!filter.CheckMessage(log_class, log_level))
-        return;
-
-    Entry entry =
-        CreateEntry(log_class, log_level, filename, line_num, function, fmt::vformat(format, args));
-
-    instance.PushEntry(std::move(entry));
+    instance.PushEntry(log_class, log_level, filename, line_num, function,
+                       fmt::vformat(format, args));
 }
 } // namespace Log

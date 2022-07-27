@@ -7,8 +7,10 @@
 #include "core/hle/applets/applet.h"
 #include "core/hle/service/apt/applet_manager.h"
 #include "core/hle/service/apt/errors.h"
+#include "core/hle/service/apt/ns.h"
 #include "core/hle/service/cfg/cfg.h"
-#include "core/hle/service/ns/ns.h"
+
+SERVICE_CONSTRUCT_IMPL(Service::APT::AppletManager)
 
 namespace Service::APT {
 
@@ -77,7 +79,7 @@ static u64 GetTitleIdForApplet(AppletId id, u32 region_value) {
                                 return data.applet_ids[0] == id || data.applet_ids[1] == id;
                             });
 
-    ASSERT_MSG(itr != applet_titleids.end(), "Unknown applet id 0x{:#05X}", static_cast<u32>(id));
+    ASSERT_MSG(itr != applet_titleids.end(), "Unknown applet id 0x{:#05X}", id);
 
     return itr->title_ids[region_value];
 }
@@ -171,7 +173,7 @@ void AppletManager::CancelAndSendParameter(const MessageParameter& parameter) {
     auto* const slot_data = GetAppletSlotData(static_cast<AppletId>(parameter.destination_id));
     if (slot_data == nullptr) {
         LOG_DEBUG(Service_APT, "No applet was registered with the id {:03X}",
-                  static_cast<u32>(parameter.destination_id));
+                  parameter.destination_id);
         return;
     }
 
@@ -207,10 +209,11 @@ ResultVal<MessageParameter> AppletManager::GlanceParameter(AppletId app_id) {
 
     // Note: The NS module always clears the DSPSleep and DSPWakeup signals even in GlanceParameter.
     if (next_parameter->signal == SignalType::DspSleep ||
-        next_parameter->signal == SignalType::DspWakeup)
+        next_parameter->signal == SignalType::DspWakeup) {
         next_parameter = {};
+    }
 
-    return MakeResult<MessageParameter>(parameter);
+    return MakeResult<MessageParameter>(std::move(parameter));
 }
 
 ResultVal<MessageParameter> AppletManager::ReceiveParameter(AppletId app_id) {
@@ -324,9 +327,6 @@ ResultCode AppletManager::PrepareToStartLibraryApplet(AppletId applet_id) {
                           ErrorSummary::InvalidState, ErrorLevel::Status);
     }
 
-    // There are some problems with LLE applets. The rasterizer cache gets out of sync
-    // when the applet is closed. To avoid breaking applications because of the issue,
-    // we are going to disable loading LLE applets before further fixes are done.
     auto cfg = Service::CFG::GetModule(system);
     u32 region_value = cfg->GetRegionValue();
     auto process =
@@ -338,8 +338,7 @@ ResultCode AppletManager::PrepareToStartLibraryApplet(AppletId applet_id) {
     // If we weren't able to load the native applet title, try to fallback to an HLE implementation.
     auto applet = HLE::Applets::Applet::Get(applet_id);
     if (applet) {
-        LOG_WARNING(Service_APT, "applet has already been started id={:08X}",
-                    static_cast<u32>(applet_id));
+        LOG_WARNING(Service_APT, "applet has already been started id={:08X}", applet_id);
         return RESULT_SUCCESS;
     } else {
         return HLE::Applets::Applet::Create(applet_id, shared_from_this());
@@ -354,9 +353,6 @@ ResultCode AppletManager::PreloadLibraryApplet(AppletId applet_id) {
                           ErrorSummary::InvalidState, ErrorLevel::Status);
     }
 
-    // There are some problems with LLE applets. The rasterizer cache gets out of sync
-    // when the applet is closed. To avoid breaking applications because of the issue,
-    // we are going to disable loading LLE applets before further fixes are done.
     auto cfg = Service::CFG::GetModule(system);
     u32 region_value = cfg->GetRegionValue();
     auto process =
@@ -368,8 +364,7 @@ ResultCode AppletManager::PreloadLibraryApplet(AppletId applet_id) {
     // If we weren't able to load the native applet title, try to fallback to an HLE implementation.
     auto applet = HLE::Applets::Applet::Get(applet_id);
     if (applet) {
-        LOG_WARNING(Service_APT, "applet has already been started id={:08X}",
-                    static_cast<u32>(applet_id));
+        LOG_WARNING(Service_APT, "applet has already been started id={:08X}", applet_id);
         return RESULT_SUCCESS;
     } else {
         return HLE::Applets::Applet::Create(applet_id, shared_from_this());
@@ -384,7 +379,7 @@ ResultCode AppletManager::FinishPreloadingLibraryApplet(AppletId applet_id) {
 }
 
 ResultCode AppletManager::StartLibraryApplet(AppletId applet_id,
-                                             Kernel::SharedPtr<Kernel::Object> object,
+                                             std::shared_ptr<Kernel::Object> object,
                                              const std::vector<u8>& buffer) {
     MessageParameter param;
     param.destination_id = applet_id;
@@ -424,7 +419,7 @@ ResultCode AppletManager::PrepareToCloseLibraryApplet(bool not_pause, bool exiti
     return RESULT_SUCCESS;
 }
 
-ResultCode AppletManager::CloseLibraryApplet(Kernel::SharedPtr<Kernel::Object> object,
+ResultCode AppletManager::CloseLibraryApplet(std::shared_ptr<Kernel::Object> object,
                                              std::vector<u8> buffer) {
     auto& slot = applet_slots[static_cast<std::size_t>(AppletSlot::LibraryApplet)];
 
@@ -458,8 +453,7 @@ ResultVal<AppletManager::AppletInfo> AppletManager::GetAppletInfo(AppletId app_i
             return ResultCode(ErrorDescription::NotFound, ErrorModule::Applet,
                               ErrorSummary::NotFound, ErrorLevel::Status);
         }
-        LOG_WARNING(Service_APT, "Using HLE applet info for applet {:03X}",
-                    static_cast<u32>(app_id));
+        LOG_WARNING(Service_APT, "Using HLE applet info for applet {:03X}", app_id);
         // TODO(Subv): Get the title id for the current applet and write it in the response[2-3]
         return MakeResult<AppletInfo>({0, Service::FS::MediaType::NAND, true, true, 0});
     }
@@ -501,6 +495,7 @@ ResultCode AppletManager::PrepareToDoApplicationJump(u64 title_id, FS::MediaType
     app_jump_parameters.current_media_type = FS::MediaType::NAND;
     app_jump_parameters.next_title_id = title_id;
     app_jump_parameters.next_media_type = media_type;
+    app_jump_parameters.flags = flags;
 
     // Note: The real console uses the Home Menu to perform the application jump, therefore the menu
     // needs to be running. The real APT module starts the Home Menu here if it's not already
@@ -508,16 +503,23 @@ ResultCode AppletManager::PrepareToDoApplicationJump(u64 title_id, FS::MediaType
     return RESULT_SUCCESS;
 }
 
-ResultCode AppletManager::DoApplicationJump() {
+ResultCode AppletManager::DoApplicationJump(DeliverArg arg) {
     // Note: The real console uses the Home Menu to perform the application jump, it goes
     // OldApplication->Home Menu->NewApplication. We do not need to use the Home Menu to do this so
     // we launch the new application directly. In the real APT service, the Home Menu must be
     // running to do this, otherwise error 0xC8A0CFF0 is returned.
 
     auto& application_slot = applet_slots[static_cast<size_t>(AppletSlot::Application)];
+
+    if (app_jump_parameters.flags != ApplicationJumpFlags::UseCurrentParameters) {
+        // The source program ID is not updated when using flags 0x2.
+        arg.source_program_id = application_slot.title_id;
+    }
+
     application_slot.Reset();
 
-    // TODO(Subv): Set the delivery parameters.
+    // Set the delivery parameters.
+    deliver_arg = std::move(arg);
 
     // TODO(Subv): Terminate the current Application.
 

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <memory>
+#include <boost/serialization/unique_ptr.hpp>
 #include "common/common_types.h"
 #include "core/hle/result.h"
 #include "delay_generator.h"
@@ -55,6 +56,15 @@ public:
         return delay_generator->GetReadDelayNs(length);
     }
 
+    u64 GetOpenDelayNs() {
+        if (delay_generator != nullptr) {
+            return delay_generator->GetOpenDelayNs();
+        }
+        LOG_ERROR(Service_FS, "Delay generator was not initalized. Using default");
+        delay_generator = std::make_unique<DefaultDelayGenerator>();
+        return delay_generator->GetOpenDelayNs();
+    }
+
     /**
      * Get the size of the file in bytes
      * @return Size of the file in bytes
@@ -81,6 +91,12 @@ public:
 
 protected:
     std::unique_ptr<DelayGenerator> delay_generator;
+
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int) {
+        ar& delay_generator;
+    }
+    friend class boost::serialization::access;
 };
 
 } // namespace FileSys

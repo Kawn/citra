@@ -4,9 +4,7 @@
 
 #pragma once
 
-#include <QAbstractItemModel>
-#include <QDockWidget>
-#include <QTimer>
+#include <QWidget>
 #include "common/microprofile.h"
 
 class MicroProfileDialog : public QWidget {
@@ -19,8 +17,8 @@ public:
     QAction* toggleViewAction();
 
 protected:
-    void showEvent(QShowEvent* ev) override;
-    void hideEvent(QHideEvent* ev) override;
+    void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
 
 private:
     QAction* toggle_view_action = nullptr;

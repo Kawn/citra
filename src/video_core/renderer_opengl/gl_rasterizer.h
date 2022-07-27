@@ -29,15 +29,20 @@
 #include "video_core/renderer_opengl/pica_to_gl.h"
 #include "video_core/shader/shader.h"
 
+namespace Frontend {
 class EmuWindow;
-class ShaderProgramManager;
+}
 
 namespace OpenGL {
+class ShaderProgramManager;
 
 class RasterizerOpenGL : public VideoCore::RasterizerInterface {
 public:
-    explicit RasterizerOpenGL(EmuWindow& renderer);
+    explicit RasterizerOpenGL(Frontend::EmuWindow& emu_window);
     ~RasterizerOpenGL() override;
+
+    void LoadDiskResources(const std::atomic_bool& stop_loading,
+                           const VideoCore::DiskResourceLoadCallback& callback) override;
 
     void AddTriangle(const Pica::Shader::OutputVertex& v0, const Pica::Shader::OutputVertex& v1,
                      const Pica::Shader::OutputVertex& v2) override;
@@ -47,12 +52,16 @@ public:
     void FlushRegion(PAddr addr, u32 size) override;
     void InvalidateRegion(PAddr addr, u32 size) override;
     void FlushAndInvalidateRegion(PAddr addr, u32 size) override;
+    void ClearAll(bool flush) override;
     bool AccelerateDisplayTransfer(const GPU::Regs::DisplayTransferConfig& config) override;
     bool AccelerateTextureCopy(const GPU::Regs::DisplayTransferConfig& config) override;
     bool AccelerateFill(const GPU::Regs::MemoryFillConfig& config) override;
     bool AccelerateDisplay(const GPU::Regs::FramebufferConfig& config, PAddr framebuffer_addr,
                            u32 pixel_stride, ScreenInfo& screen_info) override;
     bool AccelerateDrawBatch(bool is_indexed) override;
+
+    /// Syncs entire status to match PICA registers
+    void SyncEntireState() override;
 
 private:
     struct SamplerInfo {
@@ -69,9 +78,16 @@ private:
     private:
         TextureConfig::TextureFilter mag_filter;
         TextureConfig::TextureFilter min_filter;
+        TextureConfig::TextureFilter mip_filter;
         TextureConfig::WrapMode wrap_s;
         TextureConfig::WrapMode wrap_t;
         u32 border_color;
+        u32 lod_min;
+        u32 lod_max;
+        s32 lod_bias;
+
+        // TODO(wwylele): remove this once mipmap for cube is implemented
+        bool supress_mipmap_for_cube = false;
     };
 
     /// Structure that the hardware rendered vertices are composed of
@@ -117,9 +133,6 @@ private:
         GLvec4 normquat;
         GLvec3 view;
     };
-
-    /// Syncs entire status to match PICA registers
-    void SyncEntireState();
 
     /// Syncs the clip enabled status to match the PICA register
     void SyncClipEnabled();
@@ -182,7 +195,8 @@ private:
     void SyncCombinerColor();
 
     /// Syncs the TEV constant color to match the PICA register
-    void SyncTevConstColor(int tev_index, const Pica::TexturingRegs::TevStageConfig& tev_stage);
+    void SyncTevConstColor(std::size_t tev_index,
+                           const Pica::TexturingRegs::TevStageConfig& tev_stage);
 
     /// Syncs the lighting global ambient color to match the PICA register
     void SyncGlobalAmbient();
@@ -219,15 +233,16 @@ private:
 
     /// Syncs and uploads the lighting, fog and proctex LUTs
     void SyncAndUploadLUTs();
+    void SyncAndUploadLUTsLF();
 
     /// Upload the uniform blocks to the uniform buffer object
-    void UploadUniforms(bool accelerate_draw, bool use_gs);
+    void UploadUniforms(bool accelerate_draw);
 
     /// Generic draw function for DrawTriangles and AccelerateDrawBatch
     bool Draw(bool accelerate, bool is_indexed);
 
     /// Internal implementation for AccelerateDrawBatch
-    bool AccelerateDrawBatchInternal(bool is_indexed, bool use_gs);
+    bool AccelerateDrawBatchInternal(bool is_indexed);
 
     struct VertexArrayInfo {
         u32 vs_input_index_min;
@@ -251,14 +266,13 @@ private:
     bool is_amd;
 
     OpenGLState state;
+    GLuint default_texture;
 
     RasterizerCacheOpenGL res_cache;
 
-    EmuWindow& emu_window;
-
     std::vector<HardwareVertex> vertex_batch;
 
-    bool shader_dirty;
+    bool shader_dirty = true;
 
     struct {
         UniformData data;
@@ -276,7 +290,7 @@ private:
     std::unique_ptr<ShaderProgramManager> shader_program_manager;
 
     // They shall be big enough for about one frame.
-    static constexpr std::size_t VERTEX_BUFFER_SIZE = 32 * 1024 * 1024;
+    static constexpr std::size_t VERTEX_BUFFER_SIZE = 16 * 1024 * 1024;
     static constexpr std::size_t INDEX_BUFFER_SIZE = 1 * 1024 * 1024;
     static constexpr std::size_t UNIFORM_BUFFER_SIZE = 2 * 1024 * 1024;
     static constexpr std::size_t TEXTURE_BUFFER_SIZE = 1 * 1024 * 1024;
@@ -290,14 +304,15 @@ private:
     OGLStreamBuffer uniform_buffer;
     OGLStreamBuffer index_buffer;
     OGLStreamBuffer texture_buffer;
+    OGLStreamBuffer texture_lf_buffer;
     OGLFramebuffer framebuffer;
     GLint uniform_buffer_alignment;
     std::size_t uniform_size_aligned_vs;
-    std::size_t uniform_size_aligned_gs;
     std::size_t uniform_size_aligned_fs;
 
     SamplerInfo texture_cube_sampler;
 
+    OGLTexture texture_buffer_lut_lf;
     OGLTexture texture_buffer_lut_rg;
     OGLTexture texture_buffer_lut_rgba;
 

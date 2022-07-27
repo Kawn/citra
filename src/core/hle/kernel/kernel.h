@@ -11,10 +11,10 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
 #include "common/common_types.h"
 #include "core/hle/kernel/memory.h"
 #include "core/hle/result.h"
+#include "core/memory.h"
 
 namespace ConfigMem {
 class Handler;
@@ -30,6 +30,10 @@ class MemorySystem;
 
 namespace Core {
 class Timing;
+}
+
+namespace IPCDebugger {
+class Recorder;
 }
 
 namespace Kernel {
@@ -78,14 +82,15 @@ enum class MemoryRegion : u16 {
     BASE = 3,
 };
 
-template <typename T>
-using SharedPtr = boost::intrusive_ptr<T>;
-
 class KernelSystem {
 public:
     explicit KernelSystem(Memory::MemorySystem& memory, Core::Timing& timing,
-                          std::function<void()> prepare_reschedule_callback, u32 system_mode);
+                          std::function<void()> prepare_reschedule_callback, u32 system_mode,
+                          u32 num_cores, u8 n3ds_mode);
     ~KernelSystem();
+
+    using PortPair = std::pair<std::shared_ptr<ServerPort>, std::shared_ptr<ClientPort>>;
+    using SessionPair = std::pair<std::shared_ptr<ServerSession>, std::shared_ptr<ClientSession>>;
 
     /**
      * Creates an address arbiter.
@@ -93,14 +98,14 @@ public:
      * @param name Optional name used for debugging.
      * @returns The created AddressArbiter.
      */
-    SharedPtr<AddressArbiter> CreateAddressArbiter(std::string name = "Unknown");
+    std::shared_ptr<AddressArbiter> CreateAddressArbiter(std::string name = "Unknown");
 
     /**
      * Creates an event
      * @param reset_type ResetType describing how to create event
      * @param name Optional name of event
      */
-    SharedPtr<Event> CreateEvent(ResetType reset_type, std::string name = "Unknown");
+    std::shared_ptr<Event> CreateEvent(ResetType reset_type, std::string name = "Unknown");
 
     /**
      * Creates a mutex.
@@ -108,11 +113,11 @@ public:
      * @param name Optional name of mutex
      * @return Pointer to new Mutex object
      */
-    SharedPtr<Mutex> CreateMutex(bool initial_locked, std::string name = "Unknown");
+    std::shared_ptr<Mutex> CreateMutex(bool initial_locked, std::string name = "Unknown");
 
-    SharedPtr<CodeSet> CreateCodeSet(std::string name, u64 program_id);
+    std::shared_ptr<CodeSet> CreateCodeSet(std::string name, u64 program_id);
 
-    SharedPtr<Process> CreateProcess(SharedPtr<CodeSet> code_set);
+    std::shared_ptr<Process> CreateProcess(std::shared_ptr<CodeSet> code_set);
 
     /**
      * Creates and returns a new thread. The new thread is immediately scheduled
@@ -125,9 +130,10 @@ public:
      * @param owner_process The parent process for the thread
      * @return A shared pointer to the newly created thread
      */
-    ResultVal<SharedPtr<Thread>> CreateThread(std::string name, VAddr entry_point, u32 priority,
-                                              u32 arg, s32 processor_id, VAddr stack_top,
-                                              Process& owner_process);
+    ResultVal<std::shared_ptr<Thread>> CreateThread(std::string name, VAddr entry_point,
+                                                    u32 priority, u32 arg, s32 processor_id,
+                                                    VAddr stack_top,
+                                                    std::shared_ptr<Process> owner_process);
 
     /**
      * Creates a semaphore.
@@ -136,8 +142,8 @@ public:
      * @param name Optional name of semaphore
      * @return The created semaphore
      */
-    ResultVal<SharedPtr<Semaphore>> CreateSemaphore(s32 initial_count, s32 max_count,
-                                                    std::string name = "Unknown");
+    ResultVal<std::shared_ptr<Semaphore>> CreateSemaphore(s32 initial_count, s32 max_count,
+                                                          std::string name = "Unknown");
 
     /**
      * Creates a timer
@@ -145,7 +151,7 @@ public:
      * @param name Optional name of timer
      * @return The created Timer
      */
-    SharedPtr<Timer> CreateTimer(ResetType reset_type, std::string name = "Unknown");
+    std::shared_ptr<Timer> CreateTimer(ResetType reset_type, std::string name = "Unknown");
 
     /**
      * Creates a pair of ServerPort and an associated ClientPort.
@@ -154,8 +160,7 @@ public:
      * @param name Optional name of the ports
      * @return The created port tuple
      */
-    std::tuple<SharedPtr<ServerPort>, SharedPtr<ClientPort>> CreatePortPair(
-        u32 max_sessions, std::string name = "UnknownPort");
+    PortPair CreatePortPair(u32 max_sessions, std::string name = "UnknownPort");
 
     /**
      * Creates a pair of ServerSession and an associated ClientSession.
@@ -163,8 +168,8 @@ public:
      * @param client_port Optional The ClientPort that spawned this session.
      * @return The created session tuple
      */
-    std::tuple<SharedPtr<ServerSession>, SharedPtr<ClientSession>> CreateSessionPair(
-        const std::string& name = "Unknown", SharedPtr<ClientPort> client_port = nullptr);
+    SessionPair CreateSessionPair(const std::string& name = "Unknown",
+                                  std::shared_ptr<ClientPort> client_port = nullptr);
 
     ResourceLimitList& ResourceLimit();
     const ResourceLimitList& ResourceLimit() const;
@@ -181,12 +186,10 @@ public:
      * linear heap.
      * @param name Optional object name, used for debugging purposes.
      */
-    ResultVal<SharedPtr<SharedMemory>> CreateSharedMemory(Process* owner_process, u32 size,
-                                                          MemoryPermission permissions,
-                                                          MemoryPermission other_permissions,
-                                                          VAddr address = 0,
-                                                          MemoryRegion region = MemoryRegion::BASE,
-                                                          std::string name = "Unknown");
+    ResultVal<std::shared_ptr<SharedMemory>> CreateSharedMemory(
+        Process* owner_process, u32 size, MemoryPermission permissions,
+        MemoryPermission other_permissions, VAddr address = 0,
+        MemoryRegion region = MemoryRegion::BASE, std::string name = "Unknown");
 
     /**
      * Creates a shared memory object from a block of memory managed by an HLE applet.
@@ -197,21 +200,31 @@ public:
      * block.
      * @param name Optional object name, used for debugging purposes.
      */
-    SharedPtr<SharedMemory> CreateSharedMemoryForApplet(u32 offset, u32 size,
-                                                        MemoryPermission permissions,
-                                                        MemoryPermission other_permissions,
-                                                        std::string name = "Unknown Applet");
+    std::shared_ptr<SharedMemory> CreateSharedMemoryForApplet(u32 offset, u32 size,
+                                                              MemoryPermission permissions,
+                                                              MemoryPermission other_permissions,
+                                                              std::string name = "Unknown Applet");
 
     u32 GenerateObjectID();
 
     /// Retrieves a process from the current list of processes.
-    SharedPtr<Process> GetProcessById(u32 process_id) const;
+    std::shared_ptr<Process> GetProcessById(u32 process_id) const;
 
-    SharedPtr<Process> GetCurrentProcess() const;
-    void SetCurrentProcess(SharedPtr<Process> process);
+    std::shared_ptr<Process> GetCurrentProcess() const;
+    void SetCurrentProcess(std::shared_ptr<Process> process);
+    void SetCurrentProcessForCPU(std::shared_ptr<Process> process, u32 core_id);
 
-    ThreadManager& GetThreadManager();
-    const ThreadManager& GetThreadManager() const;
+    void SetCurrentMemoryPageTable(std::shared_ptr<Memory::PageTable> page_table);
+
+    void SetCPUs(std::vector<std::shared_ptr<ARM_Interface>> cpu);
+
+    void SetRunningCPU(ARM_Interface* cpu);
+
+    ThreadManager& GetThreadManager(u32 core_id);
+    const ThreadManager& GetThreadManager(u32 core_id) const;
+
+    ThreadManager& GetCurrentThreadManager();
+    const ThreadManager& GetCurrentThreadManager() const;
 
     TimerManager& GetTimerManager();
     const TimerManager& GetTimerManager() const;
@@ -221,28 +234,37 @@ public:
     SharedPage::Handler& GetSharedPageHandler();
     const SharedPage::Handler& GetSharedPageHandler() const;
 
-    MemoryRegionInfo* GetMemoryRegion(MemoryRegion region);
+    IPCDebugger::Recorder& GetIPCRecorder();
+    const IPCDebugger::Recorder& GetIPCRecorder() const;
+
+    std::shared_ptr<MemoryRegionInfo> GetMemoryRegion(MemoryRegion region);
 
     void HandleSpecialMapping(VMManager& address_space, const AddressMapping& mapping);
 
-    std::array<MemoryRegionInfo, 3> memory_regions;
+    std::array<std::shared_ptr<MemoryRegionInfo>, 3> memory_regions{};
 
     /// Adds a port to the named port table
-    void AddNamedPort(std::string name, SharedPtr<ClientPort> port);
+    void AddNamedPort(std::string name, std::shared_ptr<ClientPort> port);
 
     void PrepareReschedule() {
         prepare_reschedule_callback();
     }
 
+    u32 NewThreadId();
+
+    void ResetThreadIDs();
+
     /// Map of named ports managed by the kernel, which can be retrieved using the ConnectToPort
-    std::unordered_map<std::string, SharedPtr<ClientPort>> named_ports;
+    std::unordered_map<std::string, std::shared_ptr<ClientPort>> named_ports;
+
+    ARM_Interface* current_cpu = nullptr;
 
     Memory::MemorySystem& memory;
 
     Core::Timing& timing;
 
 private:
-    void MemoryInit(u32 mem_type);
+    void MemoryInit(u32 mem_type, u8 n3ds_mode);
 
     std::function<void()> prepare_reschedule_callback;
 
@@ -263,14 +285,23 @@ private:
     u32 next_process_id = 10;
 
     // Lists all processes that exist in the current session.
-    std::vector<SharedPtr<Process>> process_list;
+    std::vector<std::shared_ptr<Process>> process_list;
 
-    SharedPtr<Process> current_process;
+    std::shared_ptr<Process> current_process;
+    std::vector<std::shared_ptr<Process>> stored_processes;
 
-    std::unique_ptr<ThreadManager> thread_manager;
+    std::vector<std::unique_ptr<ThreadManager>> thread_managers;
 
-    std::unique_ptr<ConfigMem::Handler> config_mem_handler;
-    std::unique_ptr<SharedPage::Handler> shared_page_handler;
+    std::shared_ptr<ConfigMem::Handler> config_mem_handler;
+    std::shared_ptr<SharedPage::Handler> shared_page_handler;
+
+    std::unique_ptr<IPCDebugger::Recorder> ipc_recorder;
+
+    u32 next_thread_id;
+
+    friend class boost::serialization::access;
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int file_version);
 };
 
 } // namespace Kernel

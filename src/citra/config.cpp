@@ -13,10 +13,12 @@
 #include "common/file_util.h"
 #include "common/logging/log.h"
 #include "common/param_package.h"
+#include "core/frontend/mic.h"
 #include "core/hle/service/service.h"
 #include "core/settings.h"
 #include "input_common/main.h"
 #include "input_common/udp/client.h"
+#include "network/network_settings.h"
 
 Config::Config() {
     // TODO: Don't hardcode the path; let the frontend decide where to put the config files.
@@ -29,12 +31,12 @@ Config::Config() {
 Config::~Config() = default;
 
 bool Config::LoadINI(const std::string& default_contents, bool retry) {
-    const char* location = this->sdl2_config_loc.c_str();
+    const std::string& location = this->sdl2_config_loc;
     if (sdl2_config->ParseError() < 0) {
         if (retry) {
             LOG_WARNING(Config, "Failed to load {}. Creating file from defaults...", location);
             FileUtil::CreateFullPath(location);
-            FileUtil::WriteStringToFile(true, default_contents, location);
+            FileUtil::WriteStringToFile(true, location, default_contents);
             sdl2_config = std::make_unique<INIReader>(location); // Reopen file
 
             return LoadINI(default_contents, false);
@@ -103,42 +105,62 @@ void Config::ReadValues() {
 
     // Core
     Settings::values.use_cpu_jit = sdl2_config->GetBoolean("Core", "use_cpu_jit", true);
+    Settings::values.cpu_clock_percentage =
+        sdl2_config->GetInteger("Core", "cpu_clock_percentage", 100);
 
     // Renderer
     Settings::values.use_gles = sdl2_config->GetBoolean("Renderer", "use_gles", false);
     Settings::values.use_hw_renderer = sdl2_config->GetBoolean("Renderer", "use_hw_renderer", true);
+    Settings::values.use_hw_shader = sdl2_config->GetBoolean("Renderer", "use_hw_shader", true);
 #ifdef __APPLE__
-    // Hardware shader is broken on macos thanks to poor drivers.
+    // Separable shader is broken on macos with Intel GPU thanks to poor drivers.
     // We still want to provide this option for test/development purposes, but disable it by
     // default.
-    Settings::values.use_hw_shader = sdl2_config->GetBoolean("Renderer", "use_hw_shader", false);
-#else
-    Settings::values.use_hw_shader = sdl2_config->GetBoolean("Renderer", "use_hw_shader", true);
+    Settings::values.separable_shader =
+        sdl2_config->GetBoolean("Renderer", "separable_shader", false);
 #endif
-    Settings::values.shaders_accurate_gs =
-        sdl2_config->GetBoolean("Renderer", "shaders_accurate_gs", true);
     Settings::values.shaders_accurate_mul =
-        sdl2_config->GetBoolean("Renderer", "shaders_accurate_mul", false);
+        sdl2_config->GetBoolean("Renderer", "shaders_accurate_mul", true);
     Settings::values.use_shader_jit = sdl2_config->GetBoolean("Renderer", "use_shader_jit", true);
     Settings::values.resolution_factor =
         static_cast<u16>(sdl2_config->GetInteger("Renderer", "resolution_factor", 1));
-    Settings::values.vsync_enabled = sdl2_config->GetBoolean("Renderer", "vsync_enabled", false);
-    Settings::values.use_frame_limit = sdl2_config->GetBoolean("Renderer", "use_frame_limit", true);
+    Settings::values.use_disk_shader_cache =
+        sdl2_config->GetBoolean("Renderer", "use_disk_shader_cache", true);
     Settings::values.frame_limit =
         static_cast<u16>(sdl2_config->GetInteger("Renderer", "frame_limit", 100));
+    Settings::values.use_frame_limit_alternate =
+        sdl2_config->GetBoolean("Renderer", "use_frame_limit_alternate", false);
+    Settings::values.frame_limit_alternate =
+        static_cast<u16>(sdl2_config->GetInteger("Renderer", "frame_limit_alternate", 200));
+    Settings::values.use_vsync_new =
+        static_cast<u16>(sdl2_config->GetInteger("Renderer", "use_vsync_new", 1));
+    Settings::values.texture_filter_name =
+        sdl2_config->GetString("Renderer", "texture_filter_name", "none");
 
-    Settings::values.toggle_3d = sdl2_config->GetBoolean("Renderer", "toggle_3d", false);
+    Settings::values.render_3d = static_cast<Settings::StereoRenderOption>(
+        sdl2_config->GetInteger("Renderer", "render_3d", 0));
     Settings::values.factor_3d =
         static_cast<u8>(sdl2_config->GetInteger("Renderer", "factor_3d", 0));
+    std::string default_shader = "none (builtin)";
+    if (Settings::values.render_3d == Settings::StereoRenderOption::Anaglyph)
+        default_shader = "dubois (builtin)";
+    else if (Settings::values.render_3d == Settings::StereoRenderOption::Interlaced ||
+             Settings::values.render_3d == Settings::StereoRenderOption::ReverseInterlaced)
+        default_shader = "horizontal (builtin)";
+    Settings::values.pp_shader_name =
+        sdl2_config->GetString("Renderer", "pp_shader_name", default_shader);
+    Settings::values.filter_mode = sdl2_config->GetBoolean("Renderer", "filter_mode", true);
 
-    Settings::values.bg_red = (float)sdl2_config->GetReal("Renderer", "bg_red", 0.0);
-    Settings::values.bg_green = (float)sdl2_config->GetReal("Renderer", "bg_green", 0.0);
-    Settings::values.bg_blue = (float)sdl2_config->GetReal("Renderer", "bg_blue", 0.0);
+    Settings::values.bg_red = static_cast<float>(sdl2_config->GetReal("Renderer", "bg_red", 0.0));
+    Settings::values.bg_green =
+        static_cast<float>(sdl2_config->GetReal("Renderer", "bg_green", 0.0));
+    Settings::values.bg_blue = static_cast<float>(sdl2_config->GetReal("Renderer", "bg_blue", 0.0));
 
     // Layout
     Settings::values.layout_option =
         static_cast<Settings::LayoutOption>(sdl2_config->GetInteger("Layout", "layout_option", 0));
     Settings::values.swap_screen = sdl2_config->GetBoolean("Layout", "swap_screen", false);
+    Settings::values.upright_screen = sdl2_config->GetBoolean("Layout", "upright_screen", false);
     Settings::values.custom_layout = sdl2_config->GetBoolean("Layout", "custom_layout", false);
     Settings::values.custom_top_left =
         static_cast<u16>(sdl2_config->GetInteger("Layout", "custom_top_left", 0));
@@ -157,6 +179,12 @@ void Config::ReadValues() {
     Settings::values.custom_bottom_bottom =
         static_cast<u16>(sdl2_config->GetInteger("Layout", "custom_bottom_bottom", 480));
 
+    // Utility
+    Settings::values.dump_textures = sdl2_config->GetBoolean("Utility", "dump_textures", false);
+    Settings::values.custom_textures = sdl2_config->GetBoolean("Utility", "custom_textures", false);
+    Settings::values.preload_textures =
+        sdl2_config->GetBoolean("Utility", "preload_textures", false);
+
     // Audio
     Settings::values.enable_dsp_lle = sdl2_config->GetBoolean("Audio", "enable_dsp_lle", false);
     Settings::values.enable_dsp_lle_multithread =
@@ -165,9 +193,9 @@ void Config::ReadValues() {
     Settings::values.enable_audio_stretching =
         sdl2_config->GetBoolean("Audio", "enable_audio_stretching", true);
     Settings::values.audio_device_id = sdl2_config->GetString("Audio", "output_device", "auto");
-    Settings::values.volume = sdl2_config->GetReal("Audio", "volume", 1);
+    Settings::values.volume = static_cast<float>(sdl2_config->GetReal("Audio", "volume", 1));
     Settings::values.mic_input_device =
-        sdl2_config->GetString("Audio", "mic_input_device", "Default");
+        sdl2_config->GetString("Audio", "mic_input_device", Frontend::Mic::default_device_name);
     Settings::values.mic_input_type =
         static_cast<Settings::MicInputType>(sdl2_config->GetInteger("Audio", "mic_input_type", 0));
 
@@ -175,8 +203,17 @@ void Config::ReadValues() {
     Settings::values.use_virtual_sd =
         sdl2_config->GetBoolean("Data Storage", "use_virtual_sd", true);
 
+    const std::string default_nand_dir = FileUtil::GetDefaultUserPath(FileUtil::UserPath::NANDDir);
+    FileUtil::UpdateUserPath(
+        FileUtil::UserPath::NANDDir,
+        sdl2_config->GetString("Data Storage", "nand_directory", default_nand_dir));
+    const std::string default_sdmc_dir = FileUtil::GetDefaultUserPath(FileUtil::UserPath::SDMCDir);
+    FileUtil::UpdateUserPath(
+        FileUtil::UserPath::SDMCDir,
+        sdl2_config->GetString("Data Storage", "sdmc_directory", default_sdmc_dir));
+
     // System
-    Settings::values.is_new_3ds = sdl2_config->GetBoolean("System", "is_new_3ds", false);
+    Settings::values.is_new_3ds = sdl2_config->GetBoolean("System", "is_new_3ds", true);
     Settings::values.region_value =
         sdl2_config->GetInteger("System", "region_value", Settings::REGION_VALUE_AUTO_SELECT);
     Settings::values.init_clock =
@@ -227,6 +264,8 @@ void Config::ReadValues() {
     Settings::values.log_filter = sdl2_config->GetString("Miscellaneous", "log_filter", "*:Info");
 
     // Debugging
+    Settings::values.record_frame_times =
+        sdl2_config->GetBoolean("Debugging", "record_frame_times", false);
     Settings::values.use_gdbstub = sdl2_config->GetBoolean("Debugging", "use_gdbstub", false);
     Settings::values.gdbstub_port =
         static_cast<u16>(sdl2_config->GetInteger("Debugging", "gdbstub_port", 24689));
@@ -237,12 +276,39 @@ void Config::ReadValues() {
     }
 
     // Web Service
-    Settings::values.enable_telemetry =
+    NetSettings::values.enable_telemetry =
         sdl2_config->GetBoolean("WebService", "enable_telemetry", true);
-    Settings::values.web_api_url =
+    NetSettings::values.web_api_url =
         sdl2_config->GetString("WebService", "web_api_url", "https://api.citra-emu.org");
-    Settings::values.citra_username = sdl2_config->GetString("WebService", "citra_username", "");
-    Settings::values.citra_token = sdl2_config->GetString("WebService", "citra_token", "");
+    NetSettings::values.citra_username = sdl2_config->GetString("WebService", "citra_username", "");
+    NetSettings::values.citra_token = sdl2_config->GetString("WebService", "citra_token", "");
+
+    // Video Dumping
+    Settings::values.output_format =
+        sdl2_config->GetString("Video Dumping", "output_format", "webm");
+    Settings::values.format_options = sdl2_config->GetString("Video Dumping", "format_options", "");
+
+    Settings::values.video_encoder =
+        sdl2_config->GetString("Video Dumping", "video_encoder", "libvpx-vp9");
+
+    // Options for variable bit rate live streaming taken from here:
+    // https://developers.google.com/media/vp9/live-encoding
+    std::string default_video_options;
+    if (Settings::values.video_encoder == "libvpx-vp9") {
+        default_video_options =
+            "quality:realtime,speed:6,tile-columns:4,frame-parallel:1,threads:8,row-mt:1";
+    }
+    Settings::values.video_encoder_options =
+        sdl2_config->GetString("Video Dumping", "video_encoder_options", default_video_options);
+    Settings::values.video_bitrate =
+        sdl2_config->GetInteger("Video Dumping", "video_bitrate", 2500000);
+
+    Settings::values.audio_encoder =
+        sdl2_config->GetString("Video Dumping", "audio_encoder", "libvorbis");
+    Settings::values.audio_encoder_options =
+        sdl2_config->GetString("Video Dumping", "audio_encoder_options", "");
+    Settings::values.audio_bitrate =
+        sdl2_config->GetInteger("Video Dumping", "audio_bitrate", 64000);
 }
 
 void Config::Reload() {

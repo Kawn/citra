@@ -11,8 +11,6 @@
 #endif
 #include "common/common_types.h"
 
-#define ARRAY_SIZE(a) (sizeof(a) / sizeof(a[0]))
-
 /// Textually concatenates two tokens. The double-expansion is required by the C preprocessor.
 #define CONCAT2(x, y) DO_CONCAT2(x, y)
 #define DO_CONCAT2(x, y) x##y
@@ -28,6 +26,12 @@
 #define FORCE_INLINE __forceinline
 #else
 #define FORCE_INLINE inline __attribute__((always_inline))
+#endif
+
+#ifdef _MSC_VER
+#define CITRA_NO_INLINE __declspec(noinline)
+#else
+#define CITRA_NO_INLINE __attribute__((noinline))
 #endif
 
 #ifndef _MSC_VER
@@ -59,4 +63,4 @@ __declspec(dllimport) void __stdcall DebugBreak(void);
 // Call directly after the command or use the error num.
 // This function might change the error code.
 // Defined in Misc.cpp.
-std::string GetLastErrorMsg();
+[[nodiscard]] std::string GetLastErrorMsg();

@@ -6,10 +6,12 @@
 
 #include <memory>
 #include <string>
+#include <boost/serialization/export.hpp>
 #include "common/assert.h"
 #include "common/common_types.h"
 #include "core/hle/kernel/ipc.h"
 #include "core/hle/kernel/object.h"
+#include "core/hle/kernel/session.h"
 #include "core/hle/kernel/wait_object.h"
 #include "core/hle/result.h"
 #include "core/memory.h"
@@ -37,6 +39,9 @@ class Thread;
  */
 class ServerSession final : public WaitObject {
 public:
+    ~ServerSession() override;
+    explicit ServerSession(KernelSystem& kernel);
+
     std::string GetName() const override {
         return name;
     }
@@ -44,7 +49,7 @@ public:
         return "ServerSession";
     }
 
-    static const HandleType HANDLE_TYPE = HandleType::ServerSession;
+    static constexpr HandleType HANDLE_TYPE = HandleType::ServerSession;
     HandleType GetHandleType() const override {
         return HANDLE_TYPE;
     }
@@ -63,9 +68,9 @@ public:
      * @param thread Thread that initiated the request.
      * @returns ResultCode from the operation.
      */
-    ResultCode HandleSyncRequest(SharedPtr<Thread> thread);
+    ResultCode HandleSyncRequest(std::shared_ptr<Thread> thread);
 
-    bool ShouldWait(Thread* thread) const override;
+    bool ShouldWait(const Thread* thread) const override;
 
     void Acquire(Thread* thread) override;
 
@@ -77,20 +82,17 @@ public:
     /// List of threads that are pending a response after a sync request. This list is processed in
     /// a LIFO manner, thus, the last request will be dispatched first.
     /// TODO(Subv): Verify if this is indeed processed in LIFO using a hardware test.
-    std::vector<SharedPtr<Thread>> pending_requesting_threads;
+    std::vector<std::shared_ptr<Thread>> pending_requesting_threads;
 
     /// Thread whose request is currently being handled. A request is considered "handled" when a
     /// response is sent via svcReplyAndReceive.
     /// TODO(Subv): Find a better name for this.
-    SharedPtr<Thread> currently_handling;
+    std::shared_ptr<Thread> currently_handling;
 
     /// A temporary list holding mapped buffer info from IPC request, used for during IPC reply
     std::vector<MappedBufferContext> mapped_buffer_context;
 
 private:
-    explicit ServerSession(KernelSystem& kernel);
-    ~ServerSession() override;
-
     /**
      * Creates a server session. The server session can have an optional HLE handler,
      * which will be invoked to handle the IPC requests that this session receives.
@@ -98,11 +100,18 @@ private:
      * @param name Optional name of the server session.
      * @return The created server session
      */
-    static ResultVal<SharedPtr<ServerSession>> Create(KernelSystem& kernel,
-                                                      std::string name = "Unknown");
+    static ResultVal<std::shared_ptr<ServerSession>> Create(KernelSystem& kernel,
+                                                            std::string name = "Unknown");
 
     friend class KernelSystem;
     KernelSystem& kernel;
+
+    friend class boost::serialization::access;
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int file_version);
 };
 
 } // namespace Kernel
+
+BOOST_CLASS_EXPORT_KEY(Kernel::ServerSession)
+CONSTRUCT_KERNEL_OBJECT(Kernel::ServerSession)

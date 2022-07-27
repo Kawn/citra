@@ -1,11 +1,15 @@
 # CMake 3.8 required for 17 to be a valid value for CXX_STANDARD
 cmake_minimum_required(VERSION 3.8)
+if (${CMAKE_VERSION} VERSION_GREATER_EQUAL 3.15)
+    # Don't override the warning flags in MSVC:
+    cmake_policy(SET CMP0092 NEW)
+endif ()
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/CMakeModules")
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/externals/cmake-modules")
 include(DownloadExternals)
 include(CMakeDependentOption)
 
-project(citra)
+project(citra LANGUAGES C CXX ASM)
 
 # Set bundled sdl2/qt as dependent options.
 # OFF by default, but if ENABLE_SDL2 and MSVC are true then ON
@@ -20,16 +24,37 @@ option(ENABLE_WEB_SERVICE "Enable web services (telemetry, etc.)" ON)
 
 option(ENABLE_CUBEB "Enables the cubeb audio backend" ON)
 
-option(ENABLE_FFMPEG "Enable FFmpeg decoder/encoder" OFF)
+option(ENABLE_FFMPEG_AUDIO_DECODER "Enable FFmpeg audio (AAC) decoder" OFF)
+option(ENABLE_FFMPEG_VIDEO_DUMPER "Enable FFmpeg video dumper" OFF)
+
+if (ENABLE_FFMPEG_AUDIO_DECODER OR ENABLE_FFMPEG_VIDEO_DUMPER)
+    set(ENABLE_FFMPEG ON)
+endif()
+
+CMAKE_DEPENDENT_OPTION(CITRA_USE_BUNDLED_FFMPEG "Download bundled FFmpeg binaries" ON "ENABLE_FFMPEG;MSVC" OFF)
 
 option(USE_DISCORD_PRESENCE "Enables Discord Rich Presence" OFF)
 
-CMAKE_DEPENDENT_OPTION(ENABLE_MF "Use Media Foundation decoder" ON "WIN32;NOT ENABLE_FFMPEG" OFF)
+CMAKE_DEPENDENT_OPTION(ENABLE_MF "Use Media Foundation decoder (preferred over FFmpeg)" ON "WIN32" OFF)
+
+CMAKE_DEPENDENT_OPTION(COMPILE_WITH_DWARF "Add DWARF debugging information" ON "MINGW" OFF)
+
+option(USE_SYSTEM_BOOST "Use the system Boost libs (instead of the bundled ones)" OFF)
+
+CMAKE_DEPENDENT_OPTION(ENABLE_FDK "Use FDK AAC decoder" OFF "NOT ENABLE_FFMPEG_AUDIO_DECODER;NOT ENABLE_MF" OFF)
 
 if(NOT EXISTS ${PROJECT_SOURCE_DIR}/.git/hooks/pre-commit)
     message(STATUS "Copying pre-commit hook")
     file(COPY hooks/pre-commit
         DESTINATION ${PROJECT_SOURCE_DIR}/.git/hooks)
+endif()
+
+# Use ccache for android if available
+# =======================================================================
+if (NOT $ENV{NDK_CCACHE} EQUAL "")
+    set(CCACHE_EXE $ENV{NDK_CCACHE})
+    set(CMAKE_C_COMPILER_LAUNCHER ${CCACHE_EXE})
+    set(CMAKE_CXX_COMPILER_LAUNCHER ${CCACHE_EXE})
 endif()
 
 # Sanity check : Check that all submodules are present
@@ -56,6 +81,10 @@ if (ENABLE_COMPATIBILITY_LIST_DOWNLOAD AND NOT EXISTS ${PROJECT_BINARY_DIR}/dist
     file(DOWNLOAD
         https://api.citra-emu.org/gamedb/
         "${PROJECT_BINARY_DIR}/dist/compatibility_list/compatibility_list.json" SHOW_PROGRESS)
+endif()
+if (EXISTS ${PROJECT_SOURCE_DIR}/dist/compatibility_list/compatibility_list.json)
+    file(COPY "${PROJECT_SOURCE_DIR}/dist/compatibility_list/compatibility_list.json"
+        DESTINATION "${PROJECT_BINARY_DIR}/dist/compatibility_list/")
 endif()
 if (NOT EXISTS ${PROJECT_BINARY_DIR}/dist/compatibility_list/compatibility_list.json)
     file(WRITE ${PROJECT_BINARY_DIR}/dist/compatibility_list/compatibility_list.json "")
@@ -102,97 +131,18 @@ endif()
 message(STATUS "Target architecture: ${ARCHITECTURE}")
 
 
-# Configure compilation flags
+# Configure C++ standard
 # ===========================
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # set up output paths for executable binaries
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin/$<CONFIG>)
 
-
-if (NOT MSVC)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-attributes")
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
-
-    if (MINGW)
-        add_definitions(-DMINGW_HAS_SECURE_API)
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -gdwarf")
-
-        if (MINGW_STATIC_BUILD)
-            add_definitions(-DQT_STATICPLUGIN)
-            set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -static")
-            set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static")
-        endif()
-    endif()
-else()
-    # Silence "deprecation" warnings
-    add_definitions(/D_CRT_SECURE_NO_WARNINGS /D_CRT_NONSTDC_NO_DEPRECATE /D_SCL_SECURE_NO_WARNINGS)
-    # Avoid windows.h junk
-    add_definitions(/DNOMINMAX)
-    # Avoid windows.h from including some usually unused libs like winsocks.h, since this might cause some redefinition errors.
-    add_definitions(/DWIN32_LEAN_AND_MEAN)
-
-    set(CMAKE_CONFIGURATION_TYPES Debug Release CACHE STRING "" FORCE)
-
-    # Tweak optimization settings
-    # As far as I can tell, there's no way to override the CMake defaults while leaving user
-    # changes intact, so we'll just clobber everything and say sorry.
-    message(STATUS "Cache compiler flags ignored, please edit CMakeLists.txt to change the flags.")
-
-    # /W3 - Level 3 warnings
-    # /MP - Multi-threaded compilation
-    # /Zi - Output debugging information
-    # /Zo - enhanced debug info for optimized builds
-    # /permissive- - enables stricter C++ standards conformance checks
-    set(CMAKE_C_FLAGS   "/W3 /MP /Zi /Zo /permissive-" CACHE STRING "" FORCE)
-    # /EHsc - C++-only exception handling semantics
-    # /std:c++latest - Latest available C++ standard
-    # /Zc:throwingNew - let codegen assume `operator new` will never return null
-    # /Zc:inline - let codegen omit inline functions in object files
-    set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS} /EHsc /std:c++latest /Zc:throwingNew,inline" CACHE STRING "" FORCE)
-
-    # /MDd - Multi-threaded Debug Runtime DLL
-    set(CMAKE_C_FLAGS_DEBUG   "/Od /MDd" CACHE STRING "" FORCE)
-    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}" CACHE STRING "" FORCE)
-
-    # /O2 - Optimization level 2
-    # /GS- - No stack buffer overflow checks
-    # /MD - Multi-threaded runtime DLL
-    set(CMAKE_C_FLAGS_RELEASE   "/O2 /GS- /MD" CACHE STRING "" FORCE)
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE}" CACHE STRING "" FORCE)
-
-    set(CMAKE_EXE_LINKER_FLAGS_DEBUG   "/DEBUG /MANIFEST:NO" CACHE STRING "" FORCE)
-    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "/DEBUG /MANIFEST:NO /INCREMENTAL:NO /OPT:REF,ICF" CACHE STRING "" FORCE)
-endif()
-
-# Set file offset size to 64 bits.
-#
-# On modern Unixes, this is typically already the case. The lone exception is
-# glibc, which may default to 32 bits. glibc allows this to be configured
-# by setting _FILE_OFFSET_BITS.
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR MINGW)
-    add_definitions(-D_FILE_OFFSET_BITS=64)
-endif()
-
-add_definitions(-DSINGLETHREADED)
-# CMake seems to only define _DEBUG on Windows
-set_property(DIRECTORY APPEND PROPERTY
-    COMPILE_DEFINITIONS $<$<CONFIG:Debug>:_DEBUG> $<$<NOT:$<CONFIG:Debug>>:NDEBUG>)
 
 # System imported libraries
 # ======================
-
-find_package(Boost 1.66.0 QUIET)
-if (NOT Boost_FOUND)
-    message(STATUS "Boost 1.66.0 or newer not found, falling back to externals")
-
-    set(BOOST_ROOT "${PROJECT_SOURCE_DIR}/externals/boost")
-    set(Boost_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/externals/boost")
-    set(Boost_NO_SYSTEM_PATHS OFF)
-    find_package(Boost QUIET REQUIRED)
-endif()
 
 # Prefer the -pthread flag on Linux.
 set(THREADS_PREFER_PTHREAD_FLAG ON)
@@ -201,8 +151,8 @@ find_package(Threads REQUIRED)
 if (ENABLE_SDL2)
     if (CITRA_USE_BUNDLED_SDL2)
         # Detect toolchain and platform
-        if ((MSVC_VERSION GREATER_EQUAL 1910 AND MSVC_VERSION LESS 1920) AND ARCHITECTURE_x86_64)
-            set(SDL2_VER "SDL2-2.0.8")
+        if ((MSVC_VERSION GREATER_EQUAL 1920 AND MSVC_VERSION LESS 1940) AND ARCHITECTURE_x86_64)
+            set(SDL2_VER "SDL2-2.0.16")
         else()
             message(FATAL_ERROR "No bundled SDL2 binaries for your toolchain. Disable CITRA_USE_BUNDLED_SDL2 and provide your own.")
         endif()
@@ -231,7 +181,7 @@ endif()
 
 if (ENABLE_QT)
     if (CITRA_USE_BUNDLED_QT)
-        if ((MSVC_VERSION GREATER_EQUAL 1910 AND MSVC_VERSION LESS 1920) AND ARCHITECTURE_x86_64)
+        if ((MSVC_VERSION GREATER_EQUAL 1920 AND MSVC_VERSION LESS 1940) AND ARCHITECTURE_x86_64)
             set(QT_VER qt-5.10.0-msvc2017_64)
         else()
             message(FATAL_ERROR "No bundled Qt binaries for your toolchain. Disable CITRA_USE_BUNDLED_QT and provide your own.")
@@ -248,66 +198,83 @@ if (ENABLE_QT)
         set(QT_PREFIX_HINT)
     endif()
 
-    find_package(Qt5 REQUIRED COMPONENTS Widgets OpenGL Multimedia ${QT_PREFIX_HINT})
+    find_package(Qt5 REQUIRED COMPONENTS Widgets Multimedia ${QT_PREFIX_HINT})
 
     if (ENABLE_QT_TRANSLATION)
         find_package(Qt5 REQUIRED COMPONENTS LinguistTools ${QT_PREFIX_HINT})
     endif()
 endif()
 
+# Ensure libusb is properly configured (based on dolphin libusb include)
+if(NOT APPLE)
+    include(FindPkgConfig)
+    find_package(LibUSB)
+endif()
+if (NOT LIBUSB_FOUND)
+    add_subdirectory(externals/libusb)
+    set(LIBUSB_INCLUDE_DIR "")
+    set(LIBUSB_LIBRARIES usb)
+endif()
+
 if (ENABLE_FFMPEG)
     if (CITRA_USE_BUNDLED_FFMPEG)
-        if ((MSVC_VERSION GREATER_EQUAL 1910 AND MSVC_VERSION LESS 1920) AND ARCHITECTURE_x86_64)
-            set(FFmpeg_VER "ffmpeg-4.0.2-msvc")
+        if ((MSVC_VERSION GREATER_EQUAL 1920 AND MSVC_VERSION LESS 1940) AND ARCHITECTURE_x86_64)
+            set(FFmpeg_VER "ffmpeg-4.1-win64")
         else()
             message(FATAL_ERROR "No bundled FFmpeg binaries for your toolchain. Disable CITRA_USE_BUNDLED_FFMPEG and provide your own.")
         endif()
 
         if (DEFINED FFmpeg_VER)
             download_bundled_external("ffmpeg/" ${FFmpeg_VER} FFmpeg_PREFIX)
-            set(FFMPEG_DIR "${FFmpeg_PREFIX}/../")
-            set(FFMPEG_FOUND YES)
-        endif()
-    else()
-        find_package(FFmpeg REQUIRED COMPONENTS avcodec)
-        if ("${FFmpeg_avcodec_VERSION}" VERSION_LESS "57.48.101")
-            message(FATAL_ERROR "Found version for libavcodec is too low. The required version is at least 57.48.101 (included in FFmpeg 3.1 and later).")
-        else()
-            set(FFMPEG_FOUND YES)
+            set(FFMPEG_DIR "${FFmpeg_PREFIX}")
         endif()
     endif()
-else()
-    set(FFMPEG_FOUND NO)
+
+    if (ENABLE_FFMPEG_VIDEO_DUMPER)
+        find_package(FFmpeg REQUIRED COMPONENTS avcodec avformat avutil swscale swresample)
+    else()
+        find_package(FFmpeg REQUIRED COMPONENTS avcodec)
+    endif()
+    if ("${FFmpeg_avcodec_VERSION}" VERSION_LESS "57.48.101")
+        message(FATAL_ERROR "Found version for libavcodec is too low. The required version is at least 57.48.101 (included in FFmpeg 3.1 and later).")
+    endif()
 endif()
 
+if (ENABLE_FFMPEG_VIDEO_DUMPER)
+    add_definitions(-DENABLE_FFMPEG_VIDEO_DUMPER)
+endif()
+
+if (ENABLE_FDK)
+    find_library(FDK_AAC fdk-aac DOC "The path to fdk_aac library")
+    if(FDK_AAC STREQUAL "FDK_AAC-NOTFOUND")
+        message(FATAL_ERROR "fdk_aac library not found.")
+    endif()
+endif()
 # Platform-specific library requirements
 # ======================================
 
-IF (APPLE)
-    find_library(COCOA_LIBRARY Cocoa)           # Umbrella framework for everything GUI-related
-    set(PLATFORM_LIBRARIES ${COCOA_LIBRARY} ${IOKIT_LIBRARY} ${COREVIDEO_LIBRARY})
-
-    if (CMAKE_CXX_COMPILER_ID STREQUAL Clang)
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++")
-        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -stdlib=libc++")
-    endif()
-ELSEIF (WIN32)
+if (APPLE)
+    # Umbrella framework for everything GUI-related
+    find_library(COCOA_LIBRARY Cocoa)
+    find_library(AVFOUNDATION_LIBRARY AVFoundation)
+    set(PLATFORM_LIBRARIES ${COCOA_LIBRARY} ${AVFOUNDATION_LIBRARY} ${IOKIT_LIBRARY} ${COREVIDEO_LIBRARY})
+elseif (WIN32)
     # WSAPoll and SHGetKnownFolderPath (AppData/Roaming) didn't exist before WinNT 6.x (Vista)
     add_definitions(-D_WIN32_WINNT=0x0600 -DWINVER=0x0600)
     set(PLATFORM_LIBRARIES winmm ws2_32)
-    IF (MINGW)
+    if (MINGW)
         # PSAPI is the Process Status API
         set(PLATFORM_LIBRARIES ${PLATFORM_LIBRARIES} psapi imm32 version)
-    ENDIF (MINGW)
-ELSEIF (CMAKE_SYSTEM_NAME MATCHES "^(Linux|kFreeBSD|GNU|SunOS)$")
+    endif()
+elseif (CMAKE_SYSTEM_NAME MATCHES "^(Linux|kFreeBSD|GNU|SunOS)$")
     set(PLATFORM_LIBRARIES rt)
-ENDIF (APPLE)
+endif()
 
 # Setup a custom clang-format target (if clang-format can be found) that will run
 # against all the src files. This should be used before making a pull request.
 # =======================================================================
 
-set(CLANG_FORMAT_POSTFIX "-6.0")
+set(CLANG_FORMAT_POSTFIX "-10")
 find_program(CLANG_FORMAT
     NAMES clang-format${CLANG_FORMAT_POSTFIX}
           clang-format
@@ -318,7 +285,7 @@ if (NOT CLANG_FORMAT)
         message(STATUS "Clang format not found! Downloading...")
         set(CLANG_FORMAT "${PROJECT_BINARY_DIR}/externals/clang-format${CLANG_FORMAT_POSTFIX}.exe")
         file(DOWNLOAD
-            https://github.com/yuzu-emu/ext-windows-bin/raw/master/clang-format${CLANG_FORMAT_POSTFIX}.exe
+            https://github.com/citra-emu/ext-windows-bin/raw/master/clang-format${CLANG_FORMAT_POSTFIX}.exe
             "${CLANG_FORMAT}" SHOW_PROGRESS
             STATUS DOWNLOAD_SUCCESS)
         if (NOT DOWNLOAD_SUCCESS EQUAL 0)
@@ -336,15 +303,15 @@ if (CLANG_FORMAT)
     set(CCOMMENT "Running clang format against all the .h and .cpp files in src/")
     if (WIN32)
         add_custom_target(clang-format
-            COMMAND powershell.exe -Command "Get-ChildItem ${SRCS}/* -Include *.cpp,*.h -Recurse | Foreach {${CLANG_FORMAT} -i $_.fullname}"
+            COMMAND powershell.exe -Command "Get-ChildItem '${SRCS}/*' -Include *.cpp,*.h,*.mm -Recurse | Foreach {&'${CLANG_FORMAT}' -i $_.fullname}"
             COMMENT ${CCOMMENT})
     elseif(MINGW)
         add_custom_target(clang-format
-            COMMAND find `cygpath -u ${SRCS}` -iname *.h -o -iname *.cpp | xargs `cygpath -u ${CLANG_FORMAT}` -i
+            COMMAND find `cygpath -u ${SRCS}` -iname *.h -o -iname *.cpp -o -iname *.mm | xargs `cygpath -u ${CLANG_FORMAT}` -i
             COMMENT ${CCOMMENT})
     else()
         add_custom_target(clang-format
-            COMMAND find ${SRCS} -iname *.h -o -iname *.cpp | xargs ${CLANG_FORMAT} -i
+            COMMAND find ${SRCS} -iname *.h -o -iname *.cpp -o -iname *.mm | xargs ${CLANG_FORMAT} -i
             COMMENT ${CCOMMENT})
     endif()
     unset(SRCS)
@@ -392,8 +359,21 @@ git_describe(GIT_DESC --always --long --dirty)
 git_branch_name(GIT_BRANCH)
 get_timestamp(BUILD_DATE)
 
+if (NOT USE_SYSTEM_BOOST)
+    add_definitions( -DBOOST_ALL_NO_LIB )
+endif()
+
 enable_testing()
 add_subdirectory(externals)
+
+# Boost
+if (USE_SYSTEM_BOOST)
+    find_package(Boost 1.70.0 COMPONENTS serialization REQUIRED)
+else()
+    add_library(Boost::boost ALIAS boost)
+    add_library(Boost::serialization ALIAS boost_serialization)
+endif()
+
 add_subdirectory(src)
 add_subdirectory(dist/installer)
 

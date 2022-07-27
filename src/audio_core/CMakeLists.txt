@@ -31,27 +31,52 @@ add_library(audio_core STATIC
 
     $<$<BOOL:${SDL2_FOUND}>:sdl2_sink.cpp sdl2_sink.h>
     $<$<BOOL:${ENABLE_CUBEB}>:cubeb_sink.cpp cubeb_sink.h cubeb_input.cpp cubeb_input.h>
-    $<$<BOOL:${FFMPEG_FOUND}>:hle/ffmpeg_decoder.cpp hle/ffmpeg_decoder.h hle/ffmpeg_dl.cpp hle/ffmpeg_dl.h>
-    $<$<BOOL:${ENABLE_MF}>:hle/wmf_decoder.cpp hle/wmf_decoder.h hle/wmf_decoder_utils.cpp hle/wmf_decoder_utils.h>
 )
 
 create_target_directory_groups(audio_core)
 
-target_link_libraries(audio_core PUBLIC common core)
+target_link_libraries(audio_core PUBLIC common)
 target_link_libraries(audio_core PRIVATE SoundTouch teakra)
 
-if(FFMPEG_FOUND)
+if(ENABLE_MF)
+    target_sources(audio_core PRIVATE
+        hle/wmf_decoder.cpp
+        hle/wmf_decoder.h
+        hle/wmf_decoder_utils.cpp
+        hle/wmf_decoder_utils.h
+    )
+    # We dynamically load the required symbols from mf.dll and mfplat.dll but mfuuid is not a dll
+    # just a static library of GUIDS so include that one directly.
+    target_link_libraries(audio_core PRIVATE mfuuid.lib)
+    target_compile_definitions(audio_core PUBLIC HAVE_MF)
+elseif(ENABLE_FFMPEG_AUDIO_DECODER)
+    target_sources(audio_core PRIVATE
+        hle/ffmpeg_decoder.cpp
+        hle/ffmpeg_decoder.h
+        hle/ffmpeg_dl.cpp
+        hle/ffmpeg_dl.h
+    )
     if(UNIX)
         target_link_libraries(audio_core PRIVATE FFmpeg::avcodec)
     else()
         target_include_directories(audio_core PRIVATE ${FFMPEG_DIR}/include)
     endif()
     target_compile_definitions(audio_core PUBLIC HAVE_FFMPEG)
+elseif(ENABLE_FDK)
+    target_sources(audio_core PRIVATE
+        hle/fdk_decoder.cpp
+        hle/fdk_decoder.h
+    )
+    target_link_libraries(audio_core PRIVATE ${FDK_AAC})
+    target_compile_definitions(audio_core PUBLIC HAVE_FDK)
 endif()
 
-if(ENABLE_MF)
-    target_link_libraries(audio_core PRIVATE mf.lib mfplat.lib mfuuid.lib)
-    target_compile_definitions(audio_core PUBLIC HAVE_MF)
+if(ANDROID)
+    target_sources(audio_core PRIVATE
+        hle/mediandk_decoder.cpp
+        hle/mediandk_decoder.h
+    )
+    target_link_libraries(audio_core PRIVATE mediandk)
 endif()
 
 if(SDL2_FOUND)
@@ -63,4 +88,3 @@ if(ENABLE_CUBEB)
     target_link_libraries(audio_core PRIVATE cubeb)
     target_compile_definitions(audio_core PUBLIC HAVE_CUBEB)
 endif()
-

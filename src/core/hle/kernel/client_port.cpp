@@ -2,7 +2,9 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include "common/archives.h"
 #include "common/assert.h"
+#include "core/global.h"
 #include "core/hle/kernel/client_port.h"
 #include "core/hle/kernel/client_session.h"
 #include "core/hle/kernel/errors.h"
@@ -11,12 +13,14 @@
 #include "core/hle/kernel/server_port.h"
 #include "core/hle/kernel/server_session.h"
 
+SERIALIZE_EXPORT_IMPL(Kernel::ClientPort)
+
 namespace Kernel {
 
-ClientPort::ClientPort(KernelSystem& kernel) : kernel(kernel), Object(kernel) {}
+ClientPort::ClientPort(KernelSystem& kernel) : Object(kernel), kernel(kernel) {}
 ClientPort::~ClientPort() = default;
 
-ResultVal<SharedPtr<ClientSession>> ClientPort::Connect() {
+ResultVal<std::shared_ptr<ClientSession>> ClientPort::Connect() {
     // Note: Threads do not wait for the server endpoint to call
     // AcceptSession before returning from this call.
 
@@ -26,17 +30,17 @@ ResultVal<SharedPtr<ClientSession>> ClientPort::Connect() {
     active_sessions++;
 
     // Create a new session pair, let the created sessions inherit the parent port's HLE handler.
-    auto sessions = kernel.CreateSessionPair(server_port->GetName(), this);
+    auto [server, client] = kernel.CreateSessionPair(server_port->GetName(), SharedFrom(this));
 
     if (server_port->hle_handler)
-        server_port->hle_handler->ClientConnected(std::get<SharedPtr<ServerSession>>(sessions));
+        server_port->hle_handler->ClientConnected(server);
     else
-        server_port->pending_sessions.push_back(std::get<SharedPtr<ServerSession>>(sessions));
+        server_port->pending_sessions.push_back(server);
 
     // Wake the threads waiting on the ServerPort
     server_port->WakeupAllWaitingThreads();
 
-    return MakeResult(std::get<SharedPtr<ClientSession>>(sessions));
+    return MakeResult(client);
 }
 
 void ClientPort::ConnectionClosed() {

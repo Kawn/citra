@@ -9,6 +9,7 @@
 #include "core/hle/kernel/process.h"
 #include "core/hle/kernel/resource_limit.h"
 #include "core/hle/service/fs/archive.h"
+#include "core/hle/service/fs/fs_user.h"
 #include "core/loader/3dsx.h"
 #include "core/memory.h"
 
@@ -92,10 +93,9 @@ static u32 TranslateAddr(u32 addr, const THREEloadinfo* loadinfo, u32* offsets) 
 }
 
 using Kernel::CodeSet;
-using Kernel::SharedPtr;
 
 static THREEDSX_Error Load3DSXFile(FileUtil::IOFile& file, u32 base_addr,
-                                   SharedPtr<CodeSet>* out_codeset) {
+                                   std::shared_ptr<CodeSet>* out_codeset) {
     if (!file.IsOpen())
         return ERROR_FILE;
 
@@ -111,6 +111,11 @@ static THREEDSX_Error Load3DSXFile(FileUtil::IOFile& file, u32 base_addr,
     loadinfo.seg_sizes[0] = (hdr.code_seg_size + 0xFFF) & ~0xFFF;
     loadinfo.seg_sizes[1] = (hdr.rodata_seg_size + 0xFFF) & ~0xFFF;
     loadinfo.seg_sizes[2] = (hdr.data_seg_size + 0xFFF) & ~0xFFF;
+    // prevent integer overflow leading to heap-buffer-overflow
+    if (loadinfo.seg_sizes[0] < hdr.code_seg_size || loadinfo.seg_sizes[1] < hdr.rodata_seg_size ||
+        loadinfo.seg_sizes[2] < hdr.data_seg_size) {
+        return ERROR_READ;
+    }
     u32 offsets[2] = {loadinfo.seg_sizes[0], loadinfo.seg_sizes[0] + loadinfo.seg_sizes[1]};
     u32 n_reloc_tables = hdr.reloc_hdr_size / sizeof(u32);
     std::vector<u8> program_image(loadinfo.seg_sizes[0] + loadinfo.seg_sizes[1] +
@@ -217,7 +222,7 @@ static THREEDSX_Error Load3DSXFile(FileUtil::IOFile& file, u32 base_addr,
     }
 
     // Create the CodeSet
-    SharedPtr<CodeSet> code_set = Core::System::GetInstance().Kernel().CreateCodeSet("", 0);
+    std::shared_ptr<CodeSet> code_set = Core::System::GetInstance().Kernel().CreateCodeSet("", 0);
 
     code_set->CodeSegment().offset = loadinfo.seg_ptrs[0] - program_image.data();
     code_set->CodeSegment().addr = loadinfo.seg_addrs[0];
@@ -232,7 +237,7 @@ static THREEDSX_Error Load3DSXFile(FileUtil::IOFile& file, u32 base_addr,
     code_set->DataSegment().size = loadinfo.seg_sizes[2];
 
     code_set->entrypoint = code_set->CodeSegment().addr;
-    code_set->memory = std::make_shared<std::vector<u8>>(std::move(program_image));
+    code_set->memory = std::move(program_image);
 
     LOG_DEBUG(Loader, "code size:   {:#X}", loadinfo.seg_sizes[0]);
     LOG_DEBUG(Loader, "rodata size: {:#X}", loadinfo.seg_sizes[1]);
@@ -255,25 +260,29 @@ FileType AppLoader_THREEDSX::IdentifyType(FileUtil::IOFile& file) {
     return FileType::Error;
 }
 
-ResultStatus AppLoader_THREEDSX::Load(Kernel::SharedPtr<Kernel::Process>& process) {
+ResultStatus AppLoader_THREEDSX::Load(std::shared_ptr<Kernel::Process>& process) {
     if (is_loaded)
         return ResultStatus::ErrorAlreadyLoaded;
 
     if (!file.IsOpen())
         return ResultStatus::Error;
 
-    SharedPtr<CodeSet> codeset;
+    std::shared_ptr<CodeSet> codeset;
     if (Load3DSXFile(file, Memory::PROCESS_IMAGE_VADDR, &codeset) != ERROR_NONE)
         return ResultStatus::Error;
     codeset->name = filename;
 
     process = Core::System::GetInstance().Kernel().CreateProcess(std::move(codeset));
-    process->svc_access_mask.set();
-    process->address_mappings = default_address_mappings;
+    process->Set3dsxKernelCaps();
 
     // Attach the default resource limit (APPLICATION) to the process
     process->resource_limit = Core::System::GetInstance().Kernel().ResourceLimit().GetForCategory(
         Kernel::ResourceLimitCategory::APPLICATION);
+
+    // On real HW this is done with FS:Reg, but we can be lazy
+    auto fs_user =
+        Core::System::GetInstance().ServiceManager().GetService<Service::FS::FS_USER>("fs:USER");
+    fs_user->Register(process->GetObjectId(), process->codeset->program_id, filepath);
 
     process->Run(48, Kernel::DEFAULT_STACK_SIZE);
 
@@ -310,8 +319,8 @@ ResultStatus AppLoader_THREEDSX::ReadRomFS(std::shared_ptr<FileSys::RomFSReader>
         if (!romfs_file_inner.IsOpen())
             return ResultStatus::Error;
 
-        romfs_file = std::make_shared<FileSys::RomFSReader>(std::move(romfs_file_inner),
-                                                            romfs_offset, romfs_size);
+        romfs_file = std::make_shared<FileSys::DirectRomFSReader>(std::move(romfs_file_inner),
+                                                                  romfs_offset, romfs_size);
 
         return ResultStatus::Success;
     }
@@ -338,7 +347,7 @@ ResultStatus AppLoader_THREEDSX::ReadIcon(std::vector<u8>& buffer) {
         file.Seek(hdr.smdh_offset, SEEK_SET);
         buffer.resize(hdr.smdh_size);
 
-        if (file.ReadBytes(&buffer[0], hdr.smdh_size) != hdr.smdh_size)
+        if (file.ReadBytes(buffer.data(), hdr.smdh_size) != hdr.smdh_size)
             return ResultStatus::Error;
 
         return ResultStatus::Success;

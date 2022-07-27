@@ -11,6 +11,10 @@
 #include <string>
 #include <vector>
 #include <boost/container/static_vector.hpp>
+#include <boost/serialization/array.hpp>
+#include <boost/serialization/base_object.hpp>
+#include <boost/serialization/string.hpp>
+#include <boost/serialization/vector.hpp>
 #include "common/bit_field.h"
 #include "common/common_types.h"
 #include "core/hle/kernel/handle_table.h"
@@ -25,6 +29,16 @@ struct AddressMapping {
     u32 size;
     bool read_only;
     bool unk_flag;
+
+private:
+    friend class boost::serialization::access;
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int file_version) {
+        ar& address;
+        ar& size;
+        ar& read_only;
+        ar& unk_flag;
+    }
 };
 
 union ProcessFlags {
@@ -52,10 +66,22 @@ struct MemoryRegionInfo;
 
 class CodeSet final : public Object {
 public:
+    explicit CodeSet(KernelSystem& kernel);
+    ~CodeSet() override;
+
     struct Segment {
         std::size_t offset = 0;
         VAddr addr = 0;
         u32 size = 0;
+
+    private:
+        friend class boost::serialization::access;
+        template <class Archive>
+        void serialize(Archive& ar, const unsigned int file_version) {
+            ar& offset;
+            ar& addr;
+            ar& size;
+        }
     };
 
     std::string GetTypeName() const override {
@@ -65,7 +91,7 @@ public:
         return name;
     }
 
-    static const HandleType HANDLE_TYPE = HandleType::CodeSet;
+    static constexpr HandleType HANDLE_TYPE = HandleType::CodeSet;
     HandleType GetHandleType() const override {
         return HANDLE_TYPE;
     }
@@ -94,7 +120,7 @@ public:
         return segments[2];
     }
 
-    std::shared_ptr<std::vector<u8>> memory;
+    std::vector<u8> memory;
 
     std::array<Segment, 3> segments;
     VAddr entrypoint;
@@ -105,14 +131,23 @@ public:
     u64 program_id;
 
 private:
-    explicit CodeSet(KernelSystem& kernel);
-    ~CodeSet() override;
-
-    friend class KernelSystem;
+    friend class boost::serialization::access;
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int file_version) {
+        ar& boost::serialization::base_object<Object>(*this);
+        ar& memory;
+        ar& segments;
+        ar& entrypoint;
+        ar& name;
+        ar& program_id;
+    }
 };
 
 class Process final : public Object {
 public:
+    explicit Process(Kernel::KernelSystem& kernel);
+    ~Process() override;
+
     std::string GetTypeName() const override {
         return "Process";
     }
@@ -120,16 +155,16 @@ public:
         return codeset->name;
     }
 
-    static const HandleType HANDLE_TYPE = HandleType::Process;
+    static constexpr HandleType HANDLE_TYPE = HandleType::Process;
     HandleType GetHandleType() const override {
         return HANDLE_TYPE;
     }
 
     HandleTable handle_table;
 
-    SharedPtr<CodeSet> codeset;
+    std::shared_ptr<CodeSet> codeset;
     /// Resource limit descriptor for this process
-    SharedPtr<ResourceLimit> resource_limit;
+    std::shared_ptr<ResourceLimit> resource_limit;
 
     /// The process may only call SVCs which have the corresponding bit set.
     std::bitset<0x80> svc_access_mask;
@@ -156,6 +191,11 @@ public:
     void ParseKernelCaps(const u32* kernel_caps, std::size_t len);
 
     /**
+     * Set up the default kernel capability for 3DSX.
+     */
+    void Set3dsxKernelCaps();
+
+    /**
      * Applies address space changes and launches the process main thread.
      */
     void Run(s32 main_thread_priority, u32 stack_size);
@@ -167,7 +207,7 @@ public:
 
     u32 memory_used = 0;
 
-    MemoryRegionInfo* memory_region = nullptr;
+    std::shared_ptr<MemoryRegionInfo> memory_region = nullptr;
 
     /// The Thread Local Storage area is allocated as processes create threads,
     /// each TLS area is 0x200 bytes, so one page (0x1000) is split up in 8 parts, and each part
@@ -194,10 +234,15 @@ public:
                      bool privileged = false);
 
 private:
-    explicit Process(Kernel::KernelSystem& kernel);
-    ~Process() override;
-
-    friend class KernelSystem;
     KernelSystem& kernel;
+
+    friend class boost::serialization::access;
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int file_version);
 };
 } // namespace Kernel
+
+BOOST_CLASS_EXPORT_KEY(Kernel::CodeSet)
+BOOST_CLASS_EXPORT_KEY(Kernel::Process)
+CONSTRUCT_KERNEL_OBJECT(Kernel::CodeSet)
+CONSTRUCT_KERNEL_OBJECT(Kernel::Process)

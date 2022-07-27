@@ -2,6 +2,7 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <utility>
 #include <vector>
 #include <cubeb/cubeb.h>
 #include "audio_core/cubeb_input.h"
@@ -23,7 +24,8 @@ struct CubebInput::Impl {
     static void StateCallback(cubeb_stream* stream, void* user_data, cubeb_state state);
 };
 
-CubebInput::CubebInput() : impl(std::make_unique<Impl>()) {
+CubebInput::CubebInput(std::string device_id)
+    : impl(std::make_unique<Impl>()), device_id(std::move(device_id)) {
     if (cubeb_init(&impl->ctx, "Citra Input", nullptr) != CUBEB_OK) {
         LOG_ERROR(Audio, "cubeb_init failed! Mic will not work properly");
         return;
@@ -35,8 +37,12 @@ CubebInput::~CubebInput() {
     if (!impl->ctx)
         return;
 
-    if (cubeb_stream_stop(impl->stream) != CUBEB_OK) {
-        LOG_ERROR(Audio, "Error stopping cubeb input stream.");
+    if (impl->stream) {
+        if (cubeb_stream_stop(impl->stream) != CUBEB_OK) {
+            LOG_ERROR(Audio, "Error stopping cubeb input stream.");
+        }
+
+        cubeb_stream_destroy(impl->stream);
     }
 
     cubeb_destroy(impl->ctx);
@@ -56,6 +62,23 @@ void CubebInput::StartSampling(const Frontend::Mic::Parameters& params) {
     is_sampling = true;
 
     cubeb_devid input_device = nullptr;
+    if (device_id != Frontend::Mic::default_device_name && !device_id.empty()) {
+        cubeb_device_collection collection;
+        if (cubeb_enumerate_devices(impl->ctx, CUBEB_DEVICE_TYPE_INPUT, &collection) != CUBEB_OK) {
+            LOG_WARNING(Audio, "Audio input device enumeration not supported");
+        } else {
+            const auto collection_end = collection.device + collection.count;
+            const auto device = std::find_if(
+                collection.device, collection_end, [this](const cubeb_device_info& info) {
+                    return info.friendly_name != nullptr && device_id == info.friendly_name;
+                });
+            if (device != collection_end) {
+                input_device = device->devid;
+            }
+            cubeb_device_collection_destroy(impl->ctx, &collection);
+        }
+    }
+
     cubeb_stream_params input_params;
     input_params.channels = 1;
     input_params.layout = CUBEB_LAYOUT_UNDEFINED;
@@ -63,7 +86,7 @@ void CubebInput::StartSampling(const Frontend::Mic::Parameters& params) {
     input_params.format = CUBEB_SAMPLE_S16LE;
     input_params.rate = params.sample_rate;
 
-    u32 latency_frames;
+    u32 latency_frames = 512; // Firefox default
     if (cubeb_get_min_latency(impl->ctx, &input_params, &latency_frames) != CUBEB_OK) {
         LOG_ERROR(Audio, "Could not get minimum latency");
     }
@@ -84,8 +107,12 @@ void CubebInput::StartSampling(const Frontend::Mic::Parameters& params) {
 }
 
 void CubebInput::StopSampling() {
+    // TODO(xperia64): Destroy the stream for now to avoid a leak because StartSampling
+    // reinitializes the stream every time
     if (impl->stream) {
         cubeb_stream_stop(impl->stream);
+        cubeb_stream_destroy(impl->stream);
+        impl->stream = nullptr;
     }
     is_sampling = false;
 }
@@ -119,7 +146,7 @@ long CubebInput::Impl::DataCallback(cubeb_stream* stream, void* user_data, const
     samples.reserve(num_frames * impl->sample_size_in_bytes);
     if (impl->sample_size_in_bytes == 1) {
         // If the sample format is 8bit, then resample back to 8bit before passing back to core
-        for (std::size_t i; i < num_frames; i++) {
+        for (std::size_t i = 0; i < static_cast<std::size_t>(num_frames); i++) {
             s16 data;
             std::memcpy(&data, static_cast<const u8*>(input_buffer) + i * 2, 2);
             samples.push_back(resample_s16_s8(data));
@@ -162,4 +189,11 @@ std::vector<std::string> ListCubebInputDevices() {
     cubeb_destroy(ctx);
     return device_list;
 }
+
+CubebFactory::~CubebFactory() = default;
+
+std::unique_ptr<Frontend::Mic::Interface> CubebFactory::Create(std::string mic_device_name) {
+    return std::make_unique<CubebInput>(std::move(mic_device_name));
+}
+
 } // namespace AudioCore

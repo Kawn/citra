@@ -58,6 +58,7 @@ OpenGLState::OpenGLState() {
     texture_cube_unit.texture_cube = 0;
     texture_cube_unit.sampler = 0;
 
+    texture_buffer_lut_lf.texture_buffer = 0;
     texture_buffer_lut_rg.texture_buffer = 0;
     texture_buffer_lut_rgba.texture_buffer = 0;
 
@@ -89,6 +90,8 @@ OpenGLState::OpenGLState() {
     viewport.height = 0;
 
     clip_distance = {};
+
+    renderbuffer = 0;
 }
 
 void OpenGLState::Apply() const {
@@ -167,10 +170,17 @@ void OpenGLState::Apply() const {
     if (blend.enabled != cur_state.blend.enabled) {
         if (blend.enabled) {
             glEnable(GL_BLEND);
-            glDisable(GL_COLOR_LOGIC_OP);
         } else {
             glDisable(GL_BLEND);
-            glEnable(GL_COLOR_LOGIC_OP);
+        }
+
+        // GLES does not support glLogicOp
+        if (!GLES) {
+            if (blend.enabled) {
+                glDisable(GL_COLOR_LOGIC_OP);
+            } else {
+                glEnable(GL_COLOR_LOGIC_OP);
+            }
         }
     }
 
@@ -194,17 +204,15 @@ void OpenGLState::Apply() const {
         glBlendEquationSeparate(blend.rgb_equation, blend.a_equation);
     }
 
-    // GLES3 does not support glLogicOp
+    // GLES does not support glLogicOp
     if (!GLES) {
         if (logic_op != cur_state.logic_op) {
             glLogicOp(logic_op);
         }
-    } else {
-        LOG_TRACE(Render_OpenGL, "glLogicOps are unimplemented...");
     }
 
     // Textures
-    for (unsigned i = 0; i < ARRAY_SIZE(texture_units); ++i) {
+    for (u32 i = 0; i < texture_units.size(); ++i) {
         if (texture_units[i].texture_2d != cur_state.texture_units[i].texture_2d) {
             glActiveTexture(TextureUnits::PicaTexture(i).Enum());
             glBindTexture(GL_TEXTURE_2D, texture_units[i].texture_2d);
@@ -220,6 +228,12 @@ void OpenGLState::Apply() const {
     }
     if (texture_cube_unit.sampler != cur_state.texture_cube_unit.sampler) {
         glBindSampler(TextureUnits::TextureCube.id, texture_cube_unit.sampler);
+    }
+
+    // Texture buffer LUTs
+    if (texture_buffer_lut_lf.texture_buffer != cur_state.texture_buffer_lut_lf.texture_buffer) {
+        glActiveTexture(TextureUnits::TextureBufferLUT_LF.Enum());
+        glBindTexture(GL_TEXTURE_BUFFER, texture_buffer_lut_lf.texture_buffer);
     }
 
     // Texture buffer LUTs
@@ -337,6 +351,10 @@ void OpenGLState::Apply() const {
         }
     }
 
+    if (renderbuffer != cur_state.renderbuffer) {
+        glBindRenderbuffer(GL_RENDERBUFFER, renderbuffer);
+    }
+
     cur_state = *this;
 }
 
@@ -348,6 +366,8 @@ OpenGLState& OpenGLState::ResetTexture(GLuint handle) {
     }
     if (texture_cube_unit.texture_cube == handle)
         texture_cube_unit.texture_cube = 0;
+    if (texture_buffer_lut_lf.texture_buffer == handle)
+        texture_buffer_lut_lf.texture_buffer = 0;
     if (texture_buffer_lut_rg.texture_buffer == handle)
         texture_buffer_lut_rg.texture_buffer = 0;
     if (texture_buffer_lut_rgba.texture_buffer == handle)
@@ -418,6 +438,13 @@ OpenGLState& OpenGLState::ResetFramebuffer(GLuint handle) {
     }
     if (draw.draw_framebuffer == handle) {
         draw.draw_framebuffer = 0;
+    }
+    return *this;
+}
+
+OpenGLState& OpenGLState::ResetRenderbuffer(GLuint handle) {
+    if (renderbuffer == handle) {
+        renderbuffer = 0;
     }
     return *this;
 }

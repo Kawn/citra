@@ -2,8 +2,11 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <atomic>
 #include <cryptopp/aes.h>
 #include <cryptopp/modes.h>
+#include "common/archives.h"
+#include "common/assert.h"
 #include "core/core.h"
 #include "core/file_sys/archive_ncch.h"
 #include "core/file_sys/file_backend.h"
@@ -13,6 +16,9 @@
 #include "core/hle/service/fs/archive.h"
 #include "core/hle/service/http_c.h"
 #include "core/hw/aes/key.h"
+
+SERIALIZE_EXPORT_IMPL(Service::HTTP::HTTP_C)
+SERIALIZE_EXPORT_IMPL(Service::HTTP::SessionData)
 
 namespace Service::HTTP {
 
@@ -43,6 +49,69 @@ const ResultCode ERROR_TOO_MANY_CLIENT_CERTS = // 0xD8A0A0CB
                ErrorLevel::Permanent);
 const ResultCode ERROR_WRONG_CERT_ID = // 0xD8E0B839
     ResultCode(57, ErrorModule::SSL, ErrorSummary::InvalidArgument, ErrorLevel::Permanent);
+const ResultCode ERROR_WRONG_CERT_HANDLE = // 0xD8A0A0C9
+    ResultCode(201, ErrorModule::HTTP, ErrorSummary::InvalidState, ErrorLevel::Permanent);
+const ResultCode ERROR_CERT_ALREADY_SET = // 0xD8A0A03D
+    ResultCode(61, ErrorModule::HTTP, ErrorSummary::InvalidState, ErrorLevel::Permanent);
+
+void Context::MakeRequest() {
+    ASSERT(state == RequestState::NotStarted);
+
+#ifdef ENABLE_WEB_SERVICE
+    std::unique_ptr<httplib::Client> client = std::make_unique<httplib::Client>(url.c_str());
+    SSL_CTX* ctx = client->ssl_context();
+    if (ctx) {
+        if (auto client_cert = ssl_config.client_cert_ctx.lock()) {
+            SSL_CTX_use_certificate_ASN1(ctx, static_cast<int>(client_cert->certificate.size()),
+                                         client_cert->certificate.data());
+            SSL_CTX_use_PrivateKey_ASN1(EVP_PKEY_RSA, ctx, client_cert->private_key.data(),
+                                        static_cast<long>(client_cert->private_key.size()));
+        }
+
+        // TODO(B3N30): Check for SSLOptions-Bits and set the verify method accordingly
+        // https://www.3dbrew.org/wiki/SSL_Services#SSLOpt
+        // Hack: Since for now RootCerts are not implemented we set the VerifyMode to None.
+        SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
+    }
+
+    state = RequestState::InProgress;
+
+    static const std::unordered_map<RequestMethod, std::string> request_method_strings{
+        {RequestMethod::Get, "GET"},       {RequestMethod::Post, "POST"},
+        {RequestMethod::Head, "HEAD"},     {RequestMethod::Put, "PUT"},
+        {RequestMethod::Delete, "DELETE"}, {RequestMethod::PostEmpty, "POST"},
+        {RequestMethod::PutEmpty, "PUT"},
+    };
+
+    httplib::Request request;
+    httplib::Error error;
+    request.method = request_method_strings.at(method);
+    request.path = url;
+    // TODO(B3N30): Add post data body
+    request.progress = [this](u64 current, u64 total) -> bool {
+        // TODO(B3N30): Is there a state that shows response header are available
+        current_download_size_bytes = current;
+        total_download_size_bytes = total;
+        return true;
+    };
+
+    for (const auto& header : headers) {
+        request.headers.emplace(header.name, header.value);
+    }
+
+    if (!client->send(request, response, error)) {
+        LOG_ERROR(Service_HTTP, "Request failed: {}", error);
+        state = RequestState::TimedOut;
+    } else {
+        LOG_DEBUG(Service_HTTP, "Request successful");
+        // TODO(B3N30): Verify this state on HW
+        state = RequestState::ReadyToDownloadContent;
+    }
+#else
+    LOG_ERROR(Service_HTTP, "Tried to make request but WebServices is not enabled in this build");
+    state = RequestState::TimedOut;
+#endif
+}
 
 void HTTP_C::Initialize(Kernel::HLERequestContext& ctx) {
     IPC::RequestParser rp(ctx, 0x1, 1, 4);
@@ -79,6 +148,8 @@ void HTTP_C::InitializeConnectionSession(Kernel::HLERequestContext& ctx) {
     const Context::Handle context_handle = rp.Pop<u32>();
     u32 pid = rp.PopPID();
 
+    LOG_DEBUG(Service_HTTP, "called, context_id={} pid={}", context_handle, pid);
+
     auto* session_data = GetSessionData(ctx.Session());
     ASSERT(session_data);
 
@@ -105,7 +176,112 @@ void HTTP_C::InitializeConnectionSession(Kernel::HLERequestContext& ctx) {
 
     IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
     rb.Push(RESULT_SUCCESS);
-    LOG_DEBUG(Service_HTTP, "called, context_id={} pid={}", context_handle, pid);
+}
+
+void HTTP_C::BeginRequest(Kernel::HLERequestContext& ctx) {
+    IPC::RequestParser rp(ctx, 0x9, 1, 0);
+    const Context::Handle context_handle = rp.Pop<u32>();
+
+    LOG_WARNING(Service_HTTP, "(STUBBED) called, context_id={}", context_handle);
+
+    auto* session_data = GetSessionData(ctx.Session());
+    ASSERT(session_data);
+
+    if (!session_data->initialized) {
+        LOG_ERROR(Service_HTTP, "Tried to make a request on an uninitialized session");
+        IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
+        rb.Push(ERROR_STATE_ERROR);
+        return;
+    }
+
+    // This command can only be called with a bound context
+    if (!session_data->current_http_context) {
+        LOG_ERROR(Service_HTTP, "Tried to make a request without a bound context");
+
+        IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
+        rb.Push(ResultCode(ErrorDescription::NotImplemented, ErrorModule::HTTP,
+                           ErrorSummary::Internal, ErrorLevel::Permanent));
+        return;
+    }
+
+    if (session_data->current_http_context != context_handle) {
+        LOG_ERROR(
+            Service_HTTP,
+            "Tried to make a request on a mismatched session input context={} session context={}",
+            context_handle, *session_data->current_http_context);
+        IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
+        rb.Push(ERROR_STATE_ERROR);
+        return;
+    }
+
+    auto itr = contexts.find(context_handle);
+    ASSERT(itr != contexts.end());
+
+    // On a 3DS BeginRequest and BeginRequestAsync will push the Request to a worker queue.
+    // You can only enqueue 8 requests at the same time.
+    // trying to enqueue any more will either fail (BeginRequestAsync), or block (BeginRequest)
+    // Note that you only can have 8 Contexts at a time. So this difference shouldn't matter
+    // Then there are 3? worker threads that pop the requests from the queue and send them
+    // For now make every request async in it's own thread.
+
+    itr->second.request_future =
+        std::async(std::launch::async, &Context::MakeRequest, std::ref(itr->second));
+
+    IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
+    rb.Push(RESULT_SUCCESS);
+}
+
+void HTTP_C::BeginRequestAsync(Kernel::HLERequestContext& ctx) {
+    IPC::RequestParser rp(ctx, 0xA, 1, 0);
+    const Context::Handle context_handle = rp.Pop<u32>();
+
+    LOG_WARNING(Service_HTTP, "(STUBBED) called, context_id={}", context_handle);
+
+    auto* session_data = GetSessionData(ctx.Session());
+    ASSERT(session_data);
+
+    if (!session_data->initialized) {
+        LOG_ERROR(Service_HTTP, "Tried to make a request on an uninitialized session");
+        IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
+        rb.Push(ERROR_STATE_ERROR);
+        return;
+    }
+
+    // This command can only be called with a bound context
+    if (!session_data->current_http_context) {
+        LOG_ERROR(Service_HTTP, "Tried to make a request without a bound context");
+
+        IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
+        rb.Push(ResultCode(ErrorDescription::NotImplemented, ErrorModule::HTTP,
+                           ErrorSummary::Internal, ErrorLevel::Permanent));
+        return;
+    }
+
+    if (session_data->current_http_context != context_handle) {
+        LOG_ERROR(
+            Service_HTTP,
+            "Tried to make a request on a mismatched session input context={} session context={}",
+            context_handle, *session_data->current_http_context);
+        IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
+        rb.Push(ERROR_STATE_ERROR);
+        return;
+    }
+
+    auto itr = contexts.find(context_handle);
+    ASSERT(itr != contexts.end());
+
+    // On a 3DS BeginRequest and BeginRequestAsync will push the Request to a worker queue.
+    // You can only enqueue 8 requests at the same time.
+    // trying to enqueue any more will either fail (BeginRequestAsync), or block (BeginRequest)
+    // Note that you only can have 8 Contexts at a time. So this difference shouldn't matter
+    // Then there are 3? worker threads that pop the requests from the queue and send them
+    // For now make every request async in it's own thread.
+
+    itr->second.request_future =
+        std::async(std::launch::async, &Context::MakeRequest, std::ref(itr->second));
+
+    IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
+    rb.Push(RESULT_SUCCESS);
 }
 
 void HTTP_C::CreateContext(Kernel::HLERequestContext& ctx) {
@@ -118,8 +294,7 @@ void HTTP_C::CreateContext(Kernel::HLERequestContext& ctx) {
     std::string url(url_size, '\0');
     buffer.Read(&url[0], 0, url_size - 1);
 
-    LOG_DEBUG(Service_HTTP, "called, url_size={}, url={}, method={}", url_size, url,
-              static_cast<u32>(method));
+    LOG_DEBUG(Service_HTTP, "called, url_size={}, url={}, method={}", url_size, url, method);
 
     auto* session_data = GetSessionData(ctx.Session());
     ASSERT(session_data);
@@ -156,7 +331,7 @@ void HTTP_C::CreateContext(Kernel::HLERequestContext& ctx) {
     }
 
     if (method == RequestMethod::None || static_cast<u32>(method) >= TotalRequestMethods) {
-        LOG_ERROR(Service_HTTP, "invalid request method={}", static_cast<u32>(method));
+        LOG_ERROR(Service_HTTP, "invalid request method={}", method);
 
         IPC::RequestBuilder rb = rp.MakeBuilder(1, 2);
         rb.Push(ResultCode(ErrCodes::InvalidRequestMethod, ErrorModule::HTTP,
@@ -165,7 +340,7 @@ void HTTP_C::CreateContext(Kernel::HLERequestContext& ctx) {
         return;
     }
 
-    contexts.emplace(++context_counter, Context());
+    contexts.try_emplace(++context_counter);
     contexts[context_counter].url = std::move(url);
     contexts[context_counter].method = method;
     contexts[context_counter].state = RequestState::NotStarted;
@@ -212,10 +387,9 @@ void HTTP_C::CloseContext(Kernel::HLERequestContext& ctx) {
     }
 
     // TODO(Subv): What happens if you try to close a context that's currently being used?
-    ASSERT(itr->second.state == RequestState::NotStarted);
-
     // TODO(Subv): Make sure that only the session that created the context can close it.
 
+    // Note that this will block if a request is still in progress
     contexts.erase(itr);
     session_data->num_http_contexts--;
 
@@ -226,7 +400,7 @@ void HTTP_C::CloseContext(Kernel::HLERequestContext& ctx) {
 void HTTP_C::AddRequestHeader(Kernel::HLERequestContext& ctx) {
     IPC::RequestParser rp(ctx, 0x11, 3, 4);
     const u32 context_handle = rp.Pop<u32>();
-    const u32 name_size = rp.Pop<u32>();
+    [[maybe_unused]] const u32 name_size = rp.Pop<u32>();
     const u32 value_size = rp.Pop<u32>();
     const std::vector<u8> name_buffer = rp.PopStaticBuffer();
     Kernel::MappedBuffer& value_buffer = rp.PopMappedBuffer();
@@ -237,6 +411,9 @@ void HTTP_C::AddRequestHeader(Kernel::HLERequestContext& ctx) {
     // Copy the value_buffer into a string without the \0 at the end
     std::string value(value_size - 1, '\0');
     value_buffer.Read(&value[0], 0, value_size - 1);
+
+    LOG_DEBUG(Service_HTTP, "called, name={}, value={}, context_handle={}", name, value,
+              context_handle);
 
     auto* session_data = GetSessionData(ctx.Session());
     ASSERT(session_data);
@@ -294,15 +471,12 @@ void HTTP_C::AddRequestHeader(Kernel::HLERequestContext& ctx) {
     IPC::RequestBuilder rb = rp.MakeBuilder(1, 2);
     rb.Push(RESULT_SUCCESS);
     rb.PushMappedBuffer(value_buffer);
-
-    LOG_DEBUG(Service_HTTP, "called, name={}, value={}, context_handle={}", name, value,
-              context_handle);
 }
 
 void HTTP_C::AddPostDataAscii(Kernel::HLERequestContext& ctx) {
     IPC::RequestParser rp(ctx, 0x12, 3, 4);
     const u32 context_handle = rp.Pop<u32>();
-    const u32 name_size = rp.Pop<u32>();
+    [[maybe_unused]] const u32 name_size = rp.Pop<u32>();
     const u32 value_size = rp.Pop<u32>();
     const std::vector<u8> name_buffer = rp.PopStaticBuffer();
     Kernel::MappedBuffer& value_buffer = rp.PopMappedBuffer();
@@ -313,6 +487,9 @@ void HTTP_C::AddPostDataAscii(Kernel::HLERequestContext& ctx) {
     // Copy the value_buffer into a string without the \0 at the end
     std::string value(value_size - 1, '\0');
     value_buffer.Read(&value[0], 0, value_size - 1);
+
+    LOG_DEBUG(Service_HTTP, "called, name={}, value={}, context_handle={}", name, value,
+              context_handle);
 
     auto* session_data = GetSessionData(ctx.Session());
     ASSERT(session_data);
@@ -369,9 +546,93 @@ void HTTP_C::AddPostDataAscii(Kernel::HLERequestContext& ctx) {
     IPC::RequestBuilder rb = rp.MakeBuilder(1, 2);
     rb.Push(RESULT_SUCCESS);
     rb.PushMappedBuffer(value_buffer);
+}
 
-    LOG_DEBUG(Service_HTTP, "called, name={}, value={}, context_handle={}", name, value,
-              context_handle);
+void HTTP_C::SetClientCertContext(Kernel::HLERequestContext& ctx) {
+    IPC::RequestParser rp(ctx, 0x29, 2, 0);
+    const u32 context_handle = rp.Pop<u32>();
+    const u32 client_cert_handle = rp.Pop<u32>();
+
+    LOG_DEBUG(Service_HTTP, "called with context_handle={} client_cert_handle={}", context_handle,
+              client_cert_handle);
+
+    auto* session_data = GetSessionData(ctx.Session());
+    ASSERT(session_data);
+
+    if (!session_data->initialized) {
+        LOG_ERROR(Service_HTTP, "Tried to set client cert on an uninitialized session");
+        IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
+        rb.Push(ERROR_STATE_ERROR);
+        return;
+    }
+
+    // This command can only be called with a bound context
+    if (!session_data->current_http_context) {
+        LOG_ERROR(Service_HTTP, "Tried to set client cert without a bound context");
+        IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
+        rb.Push(ResultCode(ErrorDescription::NotImplemented, ErrorModule::HTTP,
+                           ErrorSummary::Internal, ErrorLevel::Permanent));
+        return;
+    }
+
+    if (session_data->current_http_context != context_handle) {
+        LOG_ERROR(Service_HTTP,
+                  "Tried to add set client cert on a mismatched session input context={} session "
+                  "context={}",
+                  context_handle, *session_data->current_http_context);
+        IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
+        rb.Push(ERROR_STATE_ERROR);
+        return;
+    }
+
+    auto http_context_itr = contexts.find(context_handle);
+    ASSERT(http_context_itr != contexts.end());
+
+    auto cert_context_itr = client_certs.find(client_cert_handle);
+    if (cert_context_itr == client_certs.end()) {
+        LOG_ERROR(Service_HTTP, "called with wrong client_cert_handle {}", client_cert_handle);
+        IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
+        rb.Push(ERROR_WRONG_CERT_HANDLE);
+        return;
+    }
+
+    if (http_context_itr->second.ssl_config.client_cert_ctx.lock()) {
+        LOG_ERROR(Service_HTTP,
+                  "Tried to set a client cert to a context that already has a client cert");
+        IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
+        rb.Push(ERROR_CERT_ALREADY_SET);
+        return;
+    }
+
+    if (http_context_itr->second.state != RequestState::NotStarted) {
+        LOG_ERROR(Service_HTTP,
+                  "Tried to set a client cert on a context that has already been started.");
+        IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
+        rb.Push(ResultCode(ErrCodes::InvalidRequestState, ErrorModule::HTTP,
+                           ErrorSummary::InvalidState, ErrorLevel::Permanent));
+        return;
+    }
+
+    http_context_itr->second.ssl_config.client_cert_ctx = cert_context_itr->second;
+    IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
+    rb.Push(RESULT_SUCCESS);
+}
+
+void HTTP_C::GetSSLError(Kernel::HLERequestContext& ctx) {
+    IPC::RequestParser rp(ctx, 0x2a, 2, 0);
+    const u32 context_handle = rp.Pop<u32>();
+    const u32 unk = rp.Pop<u32>();
+
+    LOG_WARNING(Service_HTTP, "(STUBBED) called, context_handle={}, unk={}", context_handle, unk);
+
+    auto http_context_itr = contexts.find(context_handle);
+    ASSERT(http_context_itr != contexts.end());
+
+    IPC::RequestBuilder rb = rp.MakeBuilder(2, 0);
+    rb.Push(RESULT_SUCCESS);
+    // Since we create the actual http/ssl context only when the request is submitted we can't check
+    // for SSL Errors here. Just submit no error.
+    rb.Push<u32>(0);
 }
 
 void HTTP_C::OpenClientCertContext(Kernel::HLERequestContext& ctx) {
@@ -380,6 +641,8 @@ void HTTP_C::OpenClientCertContext(Kernel::HLERequestContext& ctx) {
     u32 key_size = rp.Pop<u32>();
     Kernel::MappedBuffer& cert_buffer = rp.PopMappedBuffer();
     Kernel::MappedBuffer& key_buffer = rp.PopMappedBuffer();
+
+    LOG_DEBUG(Service_HTTP, "called, cert_size {}, key_size {}", cert_size, key_size);
 
     auto* session_data = GetSessionData(ctx.Session());
     ASSERT(session_data);
@@ -396,18 +659,17 @@ void HTTP_C::OpenClientCertContext(Kernel::HLERequestContext& ctx) {
         LOG_ERROR(Service_HTTP, "tried to load more then 2 client certs");
         result = ERROR_TOO_MANY_CLIENT_CERTS;
     } else {
-        ++client_certs_counter;
-        client_certs[client_certs_counter].handle = client_certs_counter;
-        client_certs[client_certs_counter].certificate.resize(cert_size);
-        cert_buffer.Read(&client_certs[client_certs_counter].certificate[0], 0, cert_size);
-        client_certs[client_certs_counter].private_key.resize(key_size);
-        cert_buffer.Read(&client_certs[client_certs_counter].private_key[0], 0, key_size);
-        client_certs[client_certs_counter].session_id = session_data->session_id;
+        client_certs[++client_certs_counter] = std::make_shared<ClientCertContext>();
+        client_certs[client_certs_counter]->handle = client_certs_counter;
+        client_certs[client_certs_counter]->certificate.resize(cert_size);
+        cert_buffer.Read(&client_certs[client_certs_counter]->certificate[0], 0, cert_size);
+        client_certs[client_certs_counter]->private_key.resize(key_size);
+        cert_buffer.Read(&client_certs[client_certs_counter]->private_key[0], 0, key_size);
+        client_certs[client_certs_counter]->session_id = session_data->session_id;
 
         ++session_data->num_client_certs;
     }
 
-    LOG_DEBUG(Service_HTTP, "called, cert_size {}, key_size {}", cert_size, key_size);
     IPC::RequestBuilder rb = rp.MakeBuilder(1, 4);
     rb.Push(result);
     rb.PushMappedBuffer(cert_buffer);
@@ -417,6 +679,8 @@ void HTTP_C::OpenClientCertContext(Kernel::HLERequestContext& ctx) {
 void HTTP_C::OpenDefaultClientCertContext(Kernel::HLERequestContext& ctx) {
     IPC::RequestParser rp(ctx, 0x33, 1, 0);
     u8 cert_id = rp.Pop<u8>();
+
+    LOG_DEBUG(Service_HTTP, "called, cert_id={} cert_handle={}", cert_id, client_certs_counter);
 
     auto* session_data = GetSessionData(ctx.Session());
     ASSERT(session_data);
@@ -459,8 +723,8 @@ void HTTP_C::OpenDefaultClientCertContext(Kernel::HLERequestContext& ctx) {
 
     const auto& it = std::find_if(client_certs.begin(), client_certs.end(),
                                   [default_cert_id, &session_data](const auto& i) {
-                                      return default_cert_id == i.second.cert_id &&
-                                             session_data->session_id == i.second.session_id;
+                                      return default_cert_id == i.second->cert_id &&
+                                             session_data->session_id == i.second->session_id;
                                   });
 
     if (it != client_certs.end()) {
@@ -472,23 +736,23 @@ void HTTP_C::OpenDefaultClientCertContext(Kernel::HLERequestContext& ctx) {
         return;
     }
 
-    ++client_certs_counter;
-    client_certs[client_certs_counter].handle = client_certs_counter;
-    client_certs[client_certs_counter].certificate = ClCertA.certificate;
-    client_certs[client_certs_counter].private_key = ClCertA.private_key;
-    client_certs[client_certs_counter].session_id = session_data->session_id;
+    client_certs[++client_certs_counter] = std::make_shared<ClientCertContext>();
+    client_certs[client_certs_counter]->handle = client_certs_counter;
+    client_certs[client_certs_counter]->certificate = ClCertA.certificate;
+    client_certs[client_certs_counter]->private_key = ClCertA.private_key;
+    client_certs[client_certs_counter]->session_id = session_data->session_id;
     ++session_data->num_client_certs;
 
     IPC::RequestBuilder rb = rp.MakeBuilder(2, 0);
     rb.Push(RESULT_SUCCESS);
     rb.Push<u32>(client_certs_counter);
-
-    LOG_DEBUG(Service_HTTP, "called, cert_id={}", cert_id);
 }
 
 void HTTP_C::CloseClientCertContext(Kernel::HLERequestContext& ctx) {
     IPC::RequestParser rp(ctx, 0x34, 1, 0);
     ClientCertContext::Handle cert_handle = rp.Pop<u32>();
+
+    LOG_DEBUG(Service_HTTP, "called, cert_handle={}", cert_handle);
 
     auto* session_data = GetSessionData(ctx.Session());
     ASSERT(session_data);
@@ -501,7 +765,7 @@ void HTTP_C::CloseClientCertContext(Kernel::HLERequestContext& ctx) {
         return;
     }
 
-    if (client_certs[cert_handle].session_id != session_data->session_id) {
+    if (client_certs[cert_handle]->session_id != session_data->session_id) {
         LOG_ERROR(Service_HTTP, "called from another main session");
         IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
         // This just return success without doing anything
@@ -514,8 +778,6 @@ void HTTP_C::CloseClientCertContext(Kernel::HLERequestContext& ctx) {
 
     IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
     rb.Push(RESULT_SUCCESS);
-
-    LOG_DEBUG(Service_HTTP, "called, cert_handle={}", cert_handle);
 }
 
 void HTTP_C::Finalize(Kernel::HLERequestContext& ctx) {
@@ -614,8 +876,8 @@ HTTP_C::HTTP_C() : ServiceFramework("http:C", 32) {
         {0x00060040, nullptr, "GetDownloadSizeState"},
         {0x00070040, nullptr, "GetRequestError"},
         {0x00080042, &HTTP_C::InitializeConnectionSession, "InitializeConnectionSession"},
-        {0x00090040, nullptr, "BeginRequest"},
-        {0x000A0040, nullptr, "BeginRequestAsync"},
+        {0x00090040, &HTTP_C::BeginRequest, "BeginRequest"},
+        {0x000A0040, &HTTP_C::BeginRequestAsync, "BeginRequestAsync"},
         {0x000B0082, nullptr, "ReceiveData"},
         {0x000C0102, nullptr, "ReceiveDataTimeout"},
         {0x000D0146, nullptr, "SetProxy"},
@@ -645,8 +907,8 @@ HTTP_C::HTTP_C() : ServiceFramework("http:C", 32) {
         {0x00250080, nullptr, "AddDefaultCert"},
         {0x00260080, nullptr, "SelectRootCertChain"},
         {0x002700C4, nullptr, "SetClientCert"},
-        {0x00290080, nullptr, "SetClientCertContext"},
-        {0x002A0040, nullptr, "GetSSLError"},
+        {0x00290080, &HTTP_C::SetClientCertContext, "SetClientCertContext"},
+        {0x002A0040, &HTTP_C::GetSSLError, "GetSSLError"},
         {0x002B0080, nullptr, "SetSSLOpt"},
         {0x002C0080, nullptr, "SetSSLClearOpt"},
         {0x002D0000, nullptr, "CreateRootCertChain"},

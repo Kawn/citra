@@ -17,7 +17,7 @@ namespace Ui {
 class HostRoom;
 }
 
-namespace Core {
+namespace Network {
 class AnnounceMultiplayerSession;
 }
 
@@ -35,19 +35,24 @@ class HostRoomWindow : public QDialog {
 
 public:
     explicit HostRoomWindow(QWidget* parent, QStandardItemModel* list,
-                            std::shared_ptr<Core::AnnounceMultiplayerSession> session);
+                            std::shared_ptr<Network::AnnounceMultiplayerSession> session);
     ~HostRoomWindow();
 
+    /**
+     * Updates the dialog with a new game list model.
+     * This model should be the original model of the game list.
+     */
+    void UpdateGameList(QStandardItemModel* list);
     void RetranslateUi();
 
 private:
     void Host();
     std::unique_ptr<Network::VerifyUser::Backend> CreateVerifyBackend(bool use_validation) const;
 
-    std::weak_ptr<Core::AnnounceMultiplayerSession> announce_multiplayer_session;
+    std::unique_ptr<Ui::HostRoom> ui;
+    std::weak_ptr<Network::AnnounceMultiplayerSession> announce_multiplayer_session;
     QStandardItemModel* game_list;
     ComboBoxProxyModel* proxy;
-    std::unique_ptr<Ui::HostRoom> ui;
     Validation validation;
 };
 

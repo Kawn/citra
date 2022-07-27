@@ -2,14 +2,16 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include "common/archives.h"
 #include "common/assert.h"
-
 #include "core/hle/kernel/client_session.h"
 #include "core/hle/kernel/errors.h"
 #include "core/hle/kernel/hle_ipc.h"
 #include "core/hle/kernel/server_session.h"
 #include "core/hle/kernel/session.h"
 #include "core/hle/kernel/thread.h"
+
+SERIALIZE_EXPORT_IMPL(Kernel::ClientSession)
 
 namespace Kernel {
 
@@ -20,7 +22,7 @@ ClientSession::~ClientSession() {
 
     // Local references to ServerSession and SessionRequestHandler are necessary to guarantee they
     // will be kept alive until after ClientDisconnected() returns.
-    SharedPtr<ServerSession> server = parent->server;
+    std::shared_ptr<ServerSession> server = SharedFrom(parent->server);
     if (server) {
         std::shared_ptr<SessionRequestHandler> hle_handler = server->hle_handler;
         if (hle_handler)
@@ -42,9 +44,9 @@ ClientSession::~ClientSession() {
     }
 }
 
-ResultCode ClientSession::SendSyncRequest(SharedPtr<Thread> thread) {
+ResultCode ClientSession::SendSyncRequest(std::shared_ptr<Thread> thread) {
     // Keep ServerSession alive until we're done working with it.
-    SharedPtr<ServerSession> server = parent->server;
+    std::shared_ptr<ServerSession> server = SharedFrom(parent->server);
     if (server == nullptr)
         return ERR_SESSION_CLOSED_BY_REMOTE;
 

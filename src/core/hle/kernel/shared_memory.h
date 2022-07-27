@@ -6,7 +6,11 @@
 
 #include <string>
 #include <utility>
+#include <boost/serialization/base_object.hpp>
+#include <boost/serialization/export.hpp>
+#include <boost/serialization/string.hpp>
 #include "common/common_types.h"
+#include "common/memory_ref.h"
 #include "core/hle/kernel/object.h"
 #include "core/hle/kernel/process.h"
 #include "core/hle/result.h"
@@ -15,6 +19,9 @@ namespace Kernel {
 
 class SharedMemory final : public Object {
 public:
+    explicit SharedMemory(KernelSystem& kernel);
+    ~SharedMemory() override;
+
     std::string GetTypeName() const override {
         return "SharedMemory";
     }
@@ -25,7 +32,7 @@ public:
         this->name = std::move(name);
     }
 
-    static const HandleType HANDLE_TYPE = HandleType::SharedMemory;
+    static constexpr HandleType HANDLE_TYPE = HandleType::SharedMemory;
     HandleType GetHandleType() const override {
         return HANDLE_TYPE;
     }
@@ -79,14 +86,11 @@ public:
     const u8* GetPointer(u32 offset = 0) const;
 
 private:
-    explicit SharedMemory(KernelSystem& kernel);
-    ~SharedMemory() override;
-
     /// Offset in FCRAM of the shared memory block in the linear heap if no address was specified
     /// during creation.
     PAddr linear_heap_phys_offset = 0;
     /// Backing memory for this shared memory block.
-    std::vector<std::pair<u8*, u32>> backing_blocks;
+    std::vector<std::pair<MemoryRef, u32>> backing_blocks;
     /// Size of the memory block. Page-aligned.
     u32 size = 0;
     /// Permission restrictions applied to the process which created the block.
@@ -104,6 +108,24 @@ private:
 
     friend class KernelSystem;
     KernelSystem& kernel;
+
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int file_version) {
+        ar& boost::serialization::base_object<Object>(*this);
+        ar& linear_heap_phys_offset;
+        ar& backing_blocks;
+        ar& size;
+        ar& permissions;
+        ar& other_permissions;
+        ar& owner_process;
+        ar& base_address;
+        ar& name;
+        ar& holding_memory;
+    }
+    friend class boost::serialization::access;
 };
 
 } // namespace Kernel
+
+BOOST_CLASS_EXPORT_KEY(Kernel::SharedMemory)
+CONSTRUCT_KERNEL_OBJECT(Kernel::SharedMemory)

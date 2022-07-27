@@ -125,8 +125,6 @@ private:
     using StorageTypeWithEndian = typename AddEndian<StorageType, EndianTag>::type;
 
 public:
-    constexpr BitField& operator=(const BitField&) = default;
-
     /// Constants to allow limited introspection of fields if needed
     static constexpr std::size_t position = Position;
     static constexpr std::size_t bits = Bits;
@@ -137,8 +135,8 @@ public:
      * containing several bitfields can be assembled by formatting each of their values and ORing
      * the results together.
      */
-    static constexpr FORCE_INLINE StorageType FormatValue(const T& value) {
-        return ((StorageType)value << position) & mask;
+    [[nodiscard]] static constexpr StorageType FormatValue(const T& value) {
+        return (static_cast<StorageType>(value) << position) & mask;
     }
 
     /**
@@ -146,7 +144,7 @@ public:
      * (such as Value() or operator T), but this can be used to extract a value from a bitfield
      * union in a constexpr context.
      */
-    static constexpr FORCE_INLINE T ExtractValue(const StorageType& storage) {
+    [[nodiscard]] static constexpr T ExtractValue(const StorageType& storage) {
         if constexpr (std::numeric_limits<UnderlyingType>::is_signed) {
             std::size_t shift = 8 * sizeof(T) - bits;
             return static_cast<T>(static_cast<UnderlyingType>(storage << (shift - position)) >>
@@ -162,11 +160,15 @@ public:
     BitField(T val) = delete;
     BitField& operator=(T val) = delete;
 
-    // Force default constructor to be created
-    // so that we can use this within unions
-    constexpr BitField() = default;
+    constexpr BitField() noexcept = default;
 
-    constexpr operator T() const {
+    constexpr BitField(const BitField&) noexcept = default;
+    constexpr BitField& operator=(const BitField&) noexcept = default;
+
+    constexpr BitField(BitField&&) noexcept = default;
+    constexpr BitField& operator=(BitField&&) noexcept = default;
+
+    [[nodiscard]] constexpr operator T() const {
         return Value();
     }
 
@@ -174,11 +176,11 @@ public:
         storage = (static_cast<StorageType>(storage) & ~mask) | FormatValue(value);
     }
 
-    constexpr T Value() const {
+    [[nodiscard]] constexpr T Value() const {
         return ExtractValue(storage);
     }
 
-    constexpr explicit operator bool() const {
+    [[nodiscard]] constexpr explicit operator bool() const {
         return Value() != 0;
     }
 

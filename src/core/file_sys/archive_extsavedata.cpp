@@ -6,6 +6,7 @@
 #include <memory>
 #include <vector>
 #include <fmt/format.h>
+#include "common/archives.h"
 #include "common/common_types.h"
 #include "common/file_util.h"
 #include "common/logging/log.h"
@@ -18,6 +19,8 @@
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // FileSys namespace
+
+SERIALIZE_EXPORT_IMPL(FileSys::ArchiveFactory_ExtSaveData)
 
 namespace FileSys {
 
@@ -59,7 +62,7 @@ private:
 class ExtSaveDataDelayGenerator : public DelayGenerator {
 public:
     u64 GetReadDelayNs(std::size_t length) override {
-        // This is the delay measured for a savedate read,
+        // This is the delay measured for a savedata read,
         // not for extsaveData
         // For now we will take that
         static constexpr u64 slope(183);
@@ -69,6 +72,16 @@ public:
             std::max<u64>(static_cast<u64>(length) * slope + offset, minimum);
         return ipc_delay_nanoseconds;
     }
+
+    u64 GetOpenDelayNs() override {
+        // This is the delay measured on N3DS with
+        // https://gist.github.com/FearlessTobi/929b68489f4abb2c6cf81d56970a20b4
+        // from the results the average of each length was taken.
+        static constexpr u64 IPCDelayNanoseconds(3085068);
+        return IPCDelayNanoseconds;
+    }
+
+    SERIALIZE_DELAY_GENERATOR
 };
 
 /**
@@ -80,7 +93,11 @@ public:
  */
 class ExtSaveDataArchive : public SaveDataArchive {
 public:
-    explicit ExtSaveDataArchive(const std::string& mount_point) : SaveDataArchive(mount_point) {}
+    explicit ExtSaveDataArchive(const std::string& mount_point,
+                                std::unique_ptr<DelayGenerator> delay_generator_)
+        : SaveDataArchive(mount_point) {
+        delay_generator = std::move(delay_generator_);
+    }
 
     std::string GetName() const override {
         return "ExtSaveDataArchive: " + mount_point;
@@ -150,6 +167,14 @@ public:
         }
         return SaveDataArchive::CreateFile(path, size);
     }
+
+private:
+    ExtSaveDataArchive() = default;
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int) {
+        ar& boost::serialization::base_object<SaveDataArchive>(*this);
+    }
+    friend class boost::serialization::access;
 };
 
 struct ExtSaveDataArchivePath {
@@ -160,7 +185,7 @@ struct ExtSaveDataArchivePath {
 
 static_assert(sizeof(ExtSaveDataArchivePath) == 12, "Incorrect path size");
 
-std::string GetExtSaveDataPath(const std::string& mount_point, const Path& path) {
+std::string GetExtSaveDataPath(std::string_view mount_point, const Path& path) {
     std::vector<u8> vec_data = path.AsBinary();
 
     ExtSaveDataArchivePath path_data;
@@ -169,16 +194,16 @@ std::string GetExtSaveDataPath(const std::string& mount_point, const Path& path)
     return fmt::format("{}{:08X}/{:08X}/", mount_point, path_data.save_high, path_data.save_low);
 }
 
-std::string GetExtDataContainerPath(const std::string& mount_point, bool shared) {
-    if (shared)
+std::string GetExtDataContainerPath(std::string_view mount_point, bool shared) {
+    if (shared) {
         return fmt::format("{}data/{}/extdata/", mount_point, SYSTEM_ID);
-
+    }
     return fmt::format("{}Nintendo 3DS/{}/{}/extdata/", mount_point, SYSTEM_ID, SDCARD_ID);
 }
 
-std::string GetExtDataPathFromId(const std::string& mount_point, u64 extdata_id) {
-    u32 high = static_cast<u32>(extdata_id >> 32);
-    u32 low = static_cast<u32>(extdata_id & 0xFFFFFFFF);
+std::string GetExtDataPathFromId(std::string_view mount_point, u64 extdata_id) {
+    const u32 high = static_cast<u32>(extdata_id >> 32);
+    const u32 low = static_cast<u32>(extdata_id & 0xFFFFFFFF);
 
     return fmt::format("{}{:08x}/{:08x}/", GetExtDataContainerPath(mount_point, false), high, low);
 }
@@ -232,7 +257,8 @@ ResultVal<std::unique_ptr<ArchiveBackend>> ArchiveFactory_ExtSaveData::Open(cons
             return ERR_NOT_FORMATTED;
         }
     }
-    auto archive = std::make_unique<ExtSaveDataArchive>(fullpath);
+    std::unique_ptr<DelayGenerator> delay_generator = std::make_unique<ExtSaveDataDelayGenerator>();
+    auto archive = std::make_unique<ExtSaveDataArchive>(fullpath, std::move(delay_generator));
     return MakeResult<std::unique_ptr<ArchiveBackend>>(std::move(archive));
 }
 
@@ -284,3 +310,6 @@ void ArchiveFactory_ExtSaveData::WriteIcon(const Path& path, const u8* icon_data
 }
 
 } // namespace FileSys
+
+SERIALIZE_EXPORT_IMPL(FileSys::ExtSaveDataDelayGenerator)
+SERIALIZE_EXPORT_IMPL(FileSys::ExtSaveDataArchive)

@@ -11,11 +11,6 @@
 // This needs to be included before getopt.h because the latter #defines symbols used by it
 #include "common/microprofile.h"
 
-#include <getopt.h>
-#ifndef _MSC_VER
-#include <unistd.h>
-#endif
-
 #ifdef _WIN32
 // windows.h needs to be included before shellapi.h
 #include <windows.h>
@@ -25,6 +20,7 @@
 
 #include "citra/config.h"
 #include "citra/emu_window/emu_window_sdl2.h"
+#include "citra/lodepng_image_interface.h"
 #include "common/common_paths.h"
 #include "common/detached_tasks.h"
 #include "common/file_util.h"
@@ -35,8 +31,11 @@
 #include "common/scope_exit.h"
 #include "common/string_util.h"
 #include "core/core.h"
+#include "core/dumping/backend.h"
 #include "core/file_sys/cia_container.h"
 #include "core/frontend/applets/default_applets.h"
+#include "core/frontend/framebuffer_layout.h"
+#include "core/frontend/scope_acquire_context.h"
 #include "core/gdbstub/gdbstub.h"
 #include "core/hle/service/am/am.h"
 #include "core/hle/service/cfg/cfg.h"
@@ -44,6 +43,13 @@
 #include "core/movie.h"
 #include "core/settings.h"
 #include "network/network.h"
+#include "video_core/renderer_base.h"
+
+#undef _UNICODE
+#include <getopt.h>
+#ifndef _MSC_VER
+#include <unistd.h>
+#endif
 
 #ifdef _WIN32
 extern "C" {
@@ -60,7 +66,9 @@ static void PrintHelp(const char* argv0) {
                  "-m, --multiplayer=nick:password@address:port"
                  " Nickname, password, address and port for multiplayer\n"
                  "-r, --movie-record=[file]  Record a movie (game inputs) to the given file\n"
+                 "-a, --movie-record-author=AUTHOR Sets the author of the movie to be recorded\n"
                  "-p, --movie-play=[file]    Playback the movie (game inputs) from the given file\n"
+                 "-d, --dump-video=[file]    Dumps audio and video to the given video file\n"
                  "-f, --fullscreen     Start in fullscreen mode\n"
                  "-h, --help           Display this help and exit\n"
                  "-v, --version        Output version information and exit\n";
@@ -185,7 +193,9 @@ int main(int argc, char** argv) {
     bool use_gdbstub = Settings::values.use_gdbstub;
     u32 gdb_port = static_cast<u32>(Settings::values.gdbstub_port);
     std::string movie_record;
+    std::string movie_record_author;
     std::string movie_play;
+    std::string dump_video;
 
     InitializeLogging();
 
@@ -213,7 +223,9 @@ int main(int argc, char** argv) {
         {"install", required_argument, 0, 'i'},
         {"multiplayer", required_argument, 0, 'm'},
         {"movie-record", required_argument, 0, 'r'},
+        {"movie-record-author", required_argument, 0, 'a'},
         {"movie-play", required_argument, 0, 'p'},
+        {"dump-video", required_argument, 0, 'd'},
         {"fullscreen", no_argument, 0, 'f'},
         {"help", no_argument, 0, 'h'},
         {"version", no_argument, 0, 'v'},
@@ -281,8 +293,14 @@ int main(int argc, char** argv) {
             case 'r':
                 movie_record = optarg;
                 break;
+            case 'a':
+                movie_record_author = optarg;
+                break;
             case 'p':
                 movie_play = optarg;
+                break;
+            case 'd':
+                dump_video = optarg;
                 break;
             case 'f':
                 fullscreen = true;
@@ -337,11 +355,12 @@ int main(int argc, char** argv) {
     // Register frontend applets
     Frontend::RegisterDefaultApplets();
 
+    // Register generic image interface
+    Core::System::GetInstance().RegisterImageInterface(std::make_shared<LodePNGImageInterface>());
+
     std::unique_ptr<EmuWindow_SDL2> emu_window{std::make_unique<EmuWindow_SDL2>(fullscreen)};
-
+    Frontend::ScopeAcquireContext scope(*emu_window);
     Core::System& system{Core::System::GetInstance()};
-
-    SCOPE_EXIT({ system.Shutdown(); });
 
     const Core::System::ResultStatus load_result{system.Load(*emu_window, filepath)};
 
@@ -374,7 +393,7 @@ int main(int argc, char** argv) {
         break; // Expected case
     }
 
-    Core::Telemetry().AddField(Telemetry::FieldType::App, "Frontend", "SDL");
+    system.TelemetrySession().AddField(Common::Telemetry::FieldType::App, "Frontend", "SDL");
 
     if (use_multiplayer) {
         if (auto member = Network::GetRoomMember().lock()) {
@@ -393,17 +412,41 @@ int main(int argc, char** argv) {
     }
 
     if (!movie_play.empty()) {
+        auto metadata = Core::Movie::GetInstance().GetMovieMetadata(movie_play);
+        LOG_INFO(Movie, "Author: {}", metadata.author);
+        LOG_INFO(Movie, "Rerecord count: {}", metadata.rerecord_count);
+        LOG_INFO(Movie, "Input count: {}", metadata.input_count);
         Core::Movie::GetInstance().StartPlayback(movie_play);
     }
     if (!movie_record.empty()) {
-        Core::Movie::GetInstance().StartRecording(movie_record);
+        Core::Movie::GetInstance().StartRecording(movie_record, movie_record_author);
     }
+    if (!dump_video.empty()) {
+        Layout::FramebufferLayout layout{
+            Layout::FrameLayoutFromResolutionScale(VideoCore::GetResolutionScaleFactor())};
+        system.VideoDumper().StartDumping(dump_video, layout);
+    }
+
+    std::thread render_thread([&emu_window] { emu_window->Present(); });
+
+    std::atomic_bool stop_run;
+    Core::System::GetInstance().Renderer().Rasterizer()->LoadDiskResources(
+        stop_run, [](VideoCore::LoadCallbackStage stage, std::size_t value, std::size_t total) {
+            LOG_DEBUG(Frontend, "Loading stage {} progress {} {}", static_cast<u32>(stage), value,
+                      total);
+        });
 
     while (emu_window->IsOpen()) {
         system.RunLoop();
     }
+    render_thread.join();
 
     Core::Movie::GetInstance().Shutdown();
+    if (system.VideoDumper().IsDumping()) {
+        system.VideoDumper().StopDumping();
+    }
+
+    system.Shutdown();
 
     detached_tasks.WaitForAllTasks();
     return 0;

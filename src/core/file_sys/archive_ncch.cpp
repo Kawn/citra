@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 #include "bad_word_list.app.romfs.h"
+#include "common/archives.h"
 #include "common/common_types.h"
 #include "common/file_util.h"
 #include "common/logging/log.h"
@@ -27,6 +28,10 @@
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // FileSys namespace
+
+SERIALIZE_EXPORT_IMPL(FileSys::NCCHArchive)
+SERIALIZE_EXPORT_IMPL(FileSys::NCCHFile)
+SERIALIZE_EXPORT_IMPL(FileSys::ArchiveFactory_NCCH)
 
 namespace FileSys {
 
@@ -51,8 +56,8 @@ Path MakeNCCHArchivePath(u64 tid, Service::FS::MediaType media_type) {
     path.media_type = static_cast<u32_le>(media_type);
     path.unknown = 0;
     std::vector<u8> archive(sizeof(path));
-    std::memcpy(&archive[0], &path, sizeof(path));
-    return FileSys::Path(archive);
+    std::memcpy(archive.data(), &path, sizeof(path));
+    return FileSys::Path(std::move(archive));
 }
 
 Path MakeNCCHFilePath(NCCHFileOpenType open_type, u32 content_index, NCCHFilePathType filepath_type,
@@ -63,8 +68,8 @@ Path MakeNCCHFilePath(NCCHFileOpenType open_type, u32 content_index, NCCHFilePat
     path.filepath_type = filepath_type;
     path.exefs_filepath = exefs_filepath;
     std::vector<u8> file(sizeof(path));
-    std::memcpy(&file[0], &path, sizeof(path));
-    return FileSys::Path(file);
+    std::memcpy(file.data(), &path, sizeof(path));
+    return FileSys::Path(std::move(file));
 }
 
 ResultVal<std::unique_ptr<FileBackend>> NCCHArchive::OpenFile(const Path& path,
@@ -85,7 +90,7 @@ ResultVal<std::unique_ptr<FileBackend>> NCCHArchive::OpenFile(const Path& path,
 
     std::string file_path =
         Service::AM::GetTitleContentPath(media_type, title_id, openfile_path.content_index);
-    auto ncch_container = NCCHContainer(file_path);
+    auto ncch_container = NCCHContainer(file_path, 0, openfile_path.content_index);
 
     Loader::ResultStatus result;
     std::unique_ptr<FileBackend> file;
@@ -106,8 +111,7 @@ ResultVal<std::unique_ptr<FileBackend>> NCCHArchive::OpenFile(const Path& path,
         std::unique_ptr<DelayGenerator> delay_generator = std::make_unique<ExeFSDelayGenerator>();
         file = std::make_unique<NCCHFile>(std::move(buffer), std::move(delay_generator));
     } else {
-        LOG_ERROR(Service_FS, "Unknown NCCH archive type {}!",
-                  static_cast<u32>(openfile_path.filepath_type));
+        LOG_ERROR(Service_FS, "Unknown NCCH archive type {}!", openfile_path.filepath_type);
         result = Loader::ResultStatus::Error;
     }
 
@@ -240,8 +244,6 @@ NCCHFile::NCCHFile(std::vector<u8> buffer, std::unique_ptr<DelayGenerator> delay
 ResultVal<std::size_t> NCCHFile::Read(const u64 offset, const std::size_t length,
                                       u8* buffer) const {
     LOG_TRACE(Service_FS, "called offset={}, length={}", offset, length);
-    std::size_t length_left = static_cast<std::size_t>(data_size - offset);
-    std::size_t read_length = static_cast<std::size_t>(std::min(length, length_left));
 
     std::size_t available_size = static_cast<std::size_t>(file_buffer.size() - offset);
     std::size_t copy_size = std::min(length, available_size);

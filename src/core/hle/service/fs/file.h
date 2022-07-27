@@ -4,8 +4,10 @@
 
 #pragma once
 
+#include <memory>
+#include <boost/serialization/base_object.hpp>
 #include "core/file_sys/archive_backend.h"
-#include "core/hle/kernel/kernel.h"
+#include "core/global.h"
 #include "core/hle/service/service.h"
 
 namespace Core {
@@ -19,13 +21,25 @@ struct FileSessionSlot : public Kernel::SessionRequestHandler::SessionDataBase {
     u64 offset;   ///< Offset that this session will start reading from.
     u64 size;     ///< Max size of the file that this session is allowed to access
     bool subfile; ///< Whether this file was opened via OpenSubFile or not.
+
+private:
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int) {
+        ar& boost::serialization::base_object<Kernel::SessionRequestHandler::SessionDataBase>(
+            *this);
+        ar& priority;
+        ar& offset;
+        ar& size;
+        ar& subfile;
+    }
+    friend class boost::serialization::access;
 };
 
 // TODO: File is not a real service, but it can still utilize ServiceFramework::RegisterHandlers.
 // Consider splitting ServiceFramework interface.
 class File final : public ServiceFramework<File, FileSessionSlot> {
 public:
-    File(Core::System& system, std::unique_ptr<FileSys::FileBackend>&& backend,
+    File(Kernel::KernelSystem& kernel, std::unique_ptr<FileSys::FileBackend>&& backend,
          const FileSys::Path& path);
     ~File() = default;
 
@@ -37,15 +51,15 @@ public:
     std::unique_ptr<FileSys::FileBackend> backend; ///< File backend interface
 
     /// Creates a new session to this File and returns the ClientSession part of the connection.
-    Kernel::SharedPtr<Kernel::ClientSession> Connect();
+    std::shared_ptr<Kernel::ClientSession> Connect();
 
     // Returns the start offset of an open file represented by the input session, opened with
     // OpenSubFile.
-    std::size_t GetSessionFileOffset(Kernel::SharedPtr<Kernel::ServerSession> session);
+    std::size_t GetSessionFileOffset(std::shared_ptr<Kernel::ServerSession> session);
 
     // Returns the size of an open file represented by the input session, opened with
     // OpenSubFile.
-    std::size_t GetSessionFileSize(Kernel::SharedPtr<Kernel::ServerSession> session);
+    std::size_t GetSessionFileSize(std::shared_ptr<Kernel::ServerSession> session);
 
 private:
     void Read(Kernel::HLERequestContext& ctx);
@@ -59,7 +73,17 @@ private:
     void OpenLinkFile(Kernel::HLERequestContext& ctx);
     void OpenSubFile(Kernel::HLERequestContext& ctx);
 
-    Core::System& system;
+    Kernel::KernelSystem& kernel;
+
+    File(Kernel::KernelSystem& kernel);
+    File();
+
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int);
+    friend class boost::serialization::access;
 };
 
 } // namespace Service::FS
+
+BOOST_CLASS_EXPORT_KEY(Service::FS::FileSessionSlot)
+BOOST_CLASS_EXPORT_KEY(Service::FS::File)

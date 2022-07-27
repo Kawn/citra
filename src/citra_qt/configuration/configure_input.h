@@ -10,15 +10,16 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
-#include <QKeyEvent>
 #include <QKeySequence>
 #include <QWidget>
 #include "common/param_package.h"
 #include "core/settings.h"
 #include "input_common/main.h"
-#include "ui_configure_input.h"
 
+class QKeyEvent;
+class QLabel;
 class QPushButton;
+class QSlider;
 class QString;
 class QTimer;
 
@@ -34,11 +35,11 @@ public:
     ~ConfigureInput() override;
 
     /// Save all button configurations to settings file
-    void applyConfiguration();
-    void retranslateUi();
+    void ApplyConfiguration();
+    void RetranslateUI();
 
     /// Load configuration settings.
-    void loadConfiguration();
+    void LoadConfiguration();
     void EmitInputKeysChanged();
 
     /// Save the current input profile index
@@ -74,6 +75,10 @@ private:
     /// Analog inputs are also represented each with a single button, used to configure with an
     /// actual analog stick
     std::array<QPushButton*, Settings::NativeAnalog::NumAnalogs> analog_map_stick;
+    std::array<QSlider*, Settings::NativeAnalog::NumAnalogs>
+        analog_map_deadzone_and_modifier_slider;
+    std::array<QLabel*, Settings::NativeAnalog::NumAnalogs>
+        analog_map_deadzone_and_modifier_slider_label;
 
     static const std::array<std::string, ANALOG_SUB_BUTTONS_NUM> analog_sub_buttons;
 
@@ -93,16 +98,19 @@ private:
     /// Generates list of all used keys
     QList<QKeySequence> GetUsedKeyboardKeys();
 
+    void MapFromButton(const Common::ParamPackage& params);
+    void AutoMap();
+
     /// Restore all buttons to their default values.
-    void restoreDefaults();
+    void RestoreDefaults();
     /// Clear all input configuration
     void ClearAll();
 
     /// Update UI to reflect current configuration.
-    void updateButtonLabels();
+    void UpdateButtonLabels();
 
     /// Called when the button was pressed.
-    void handleClick(QPushButton* button,
+    void HandleClick(QPushButton* button,
                      std::function<void(const Common::ParamPackage&)> new_input_setter,
                      InputCommon::Polling::DeviceType type);
 
@@ -110,7 +118,7 @@ private:
     int previous_key_code;
 
     /// Finish polling and configure input using the input_setter
-    void setPollingResult(const Common::ParamPackage& params, bool abort);
+    void SetPollingResult(const Common::ParamPackage& params, bool abort);
 
     /// Handle key press events.
     void keyPressEvent(QKeyEvent* event) override;
@@ -119,4 +127,7 @@ private:
     void NewProfile();
     void DeleteProfile();
     void RenameProfile();
+
+    bool IsProfileNameDuplicate(const QString& name) const;
+    void WarnProposedProfileNameIsDuplicate();
 };

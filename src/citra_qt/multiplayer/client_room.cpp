@@ -16,7 +16,7 @@
 #include "citra_qt/multiplayer/moderation_dialog.h"
 #include "citra_qt/multiplayer/state.h"
 #include "common/logging/log.h"
-#include "core/announce_multiplayer_session.h"
+#include "network/announce_multiplayer_session.h"
 #include "ui_client_room.h"
 
 ClientRoomWindow::ClientRoomWindow(QWidget* parent)
@@ -40,7 +40,7 @@ ClientRoomWindow::ClientRoomWindow(QWidget* parent)
         // TODO (jroweboy) network was not initialized?
     }
 
-    connect(ui->disconnect, &QPushButton::pressed, [this] { Disconnect(); });
+    connect(ui->disconnect, &QPushButton::clicked, this, &ClientRoomWindow::Disconnect);
     ui->disconnect->setDefault(false);
     ui->disconnect->setAutoDefault(false);
     connect(ui->moderation, &QPushButton::clicked, [this] {

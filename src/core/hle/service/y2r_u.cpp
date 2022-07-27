@@ -2,7 +2,9 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <array>
 #include <cstring>
+#include "common/archives.h"
 #include "common/common_funcs.h"
 #include "common/logging/log.h"
 #include "core/core.h"
@@ -12,14 +14,28 @@
 #include "core/hle/service/y2r_u.h"
 #include "core/hw/y2r.h"
 
+SERVICE_CONSTRUCT_IMPL(Service::Y2R::Y2R_U)
+SERIALIZE_EXPORT_IMPL(Service::Y2R::Y2R_U)
+
 namespace Service::Y2R {
 
-static const CoefficientSet standard_coefficients[4] = {
+template <class Archive>
+void Y2R_U::serialize(Archive& ar, const unsigned int) {
+    ar& boost::serialization::base_object<Kernel::SessionRequestHandler>(*this);
+    ar& completion_event;
+    ar& conversion;
+    ar& dithering_weight_params;
+    ar& temporal_dithering_enabled;
+    ar& transfer_end_interrupt_enabled;
+    ar& spacial_dithering_enabled;
+}
+
+constexpr std::array<CoefficientSet, 4> standard_coefficients{{
     {{0x100, 0x166, 0xB6, 0x58, 0x1C5, -0x166F, 0x10EE, -0x1C5B}}, // ITU_Rec601
     {{0x100, 0x193, 0x77, 0x2F, 0x1DB, -0x1933, 0xA7C, -0x1D51}},  // ITU_Rec709
     {{0x12A, 0x198, 0xD0, 0x64, 0x204, -0x1BDE, 0x10F2, -0x229B}}, // ITU_Rec601_Scaling
     {{0x12A, 0x1CA, 0x88, 0x36, 0x21C, -0x1F04, 0x99C, -0x2421}},  // ITU_Rec709_Scaling
-};
+}};
 
 ResultCode ConversionConfiguration::SetInputLineWidth(u16 width) {
     if (width == 0 || width > 1024 || width % 8 != 0) {
@@ -51,8 +67,8 @@ ResultCode ConversionConfiguration::SetInputLines(u16 lines) {
 
 ResultCode ConversionConfiguration::SetStandardCoefficient(
     StandardCoefficient standard_coefficient) {
-    std::size_t index = static_cast<std::size_t>(standard_coefficient);
-    if (index >= ARRAY_SIZE(standard_coefficients)) {
+    const auto index = static_cast<std::size_t>(standard_coefficient);
+    if (index >= standard_coefficients.size()) {
         return ResultCode(ErrorDescription::InvalidEnumValue, ErrorModule::CAM,
                           ErrorSummary::InvalidArgument, ErrorLevel::Usage); // 0xE0E053ED
     }
@@ -69,7 +85,7 @@ void Y2R_U::SetInputFormat(Kernel::HLERequestContext& ctx) {
     IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
     rb.Push(RESULT_SUCCESS);
 
-    LOG_DEBUG(Service_Y2R, "called input_format={}", static_cast<u8>(conversion.input_format));
+    LOG_DEBUG(Service_Y2R, "called input_format={}", conversion.input_format);
 }
 
 void Y2R_U::GetInputFormat(Kernel::HLERequestContext& ctx) {
@@ -79,7 +95,7 @@ void Y2R_U::GetInputFormat(Kernel::HLERequestContext& ctx) {
     rb.Push(RESULT_SUCCESS);
     rb.PushEnum(conversion.input_format);
 
-    LOG_DEBUG(Service_Y2R, "called input_format={}", static_cast<u8>(conversion.input_format));
+    LOG_DEBUG(Service_Y2R, "called input_format={}", conversion.input_format);
 }
 
 void Y2R_U::SetOutputFormat(Kernel::HLERequestContext& ctx) {
@@ -90,7 +106,7 @@ void Y2R_U::SetOutputFormat(Kernel::HLERequestContext& ctx) {
     IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
     rb.Push(RESULT_SUCCESS);
 
-    LOG_DEBUG(Service_Y2R, "called output_format={}", static_cast<u8>(conversion.output_format));
+    LOG_DEBUG(Service_Y2R, "called output_format={}", conversion.output_format);
 }
 
 void Y2R_U::GetOutputFormat(Kernel::HLERequestContext& ctx) {
@@ -100,7 +116,7 @@ void Y2R_U::GetOutputFormat(Kernel::HLERequestContext& ctx) {
     rb.Push(RESULT_SUCCESS);
     rb.PushEnum(conversion.output_format);
 
-    LOG_DEBUG(Service_Y2R, "called output_format={}", static_cast<u8>(conversion.output_format));
+    LOG_DEBUG(Service_Y2R, "called output_format={}", conversion.output_format);
 }
 
 void Y2R_U::SetRotation(Kernel::HLERequestContext& ctx) {
@@ -111,7 +127,7 @@ void Y2R_U::SetRotation(Kernel::HLERequestContext& ctx) {
     IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
     rb.Push(RESULT_SUCCESS);
 
-    LOG_DEBUG(Service_Y2R, "called rotation={}", static_cast<u8>(conversion.rotation));
+    LOG_DEBUG(Service_Y2R, "called rotation={}", conversion.rotation);
 }
 
 void Y2R_U::GetRotation(Kernel::HLERequestContext& ctx) {
@@ -121,7 +137,7 @@ void Y2R_U::GetRotation(Kernel::HLERequestContext& ctx) {
     rb.Push(RESULT_SUCCESS);
     rb.PushEnum(conversion.rotation);
 
-    LOG_DEBUG(Service_Y2R, "called rotation={}", static_cast<u8>(conversion.rotation));
+    LOG_DEBUG(Service_Y2R, "called rotation={}", conversion.rotation);
 }
 
 void Y2R_U::SetBlockAlignment(Kernel::HLERequestContext& ctx) {
@@ -132,8 +148,7 @@ void Y2R_U::SetBlockAlignment(Kernel::HLERequestContext& ctx) {
     IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
     rb.Push(RESULT_SUCCESS);
 
-    LOG_DEBUG(Service_Y2R, "called block_alignment={}",
-              static_cast<u8>(conversion.block_alignment));
+    LOG_DEBUG(Service_Y2R, "called block_alignment={}", conversion.block_alignment);
 }
 
 void Y2R_U::GetBlockAlignment(Kernel::HLERequestContext& ctx) {
@@ -143,8 +158,7 @@ void Y2R_U::GetBlockAlignment(Kernel::HLERequestContext& ctx) {
     rb.Push(RESULT_SUCCESS);
     rb.PushEnum(conversion.block_alignment);
 
-    LOG_DEBUG(Service_Y2R, "called block_alignment={}",
-              static_cast<u8>(conversion.block_alignment));
+    LOG_DEBUG(Service_Y2R, "called block_alignment={}", conversion.block_alignment);
 }
 
 void Y2R_U::SetSpacialDithering(Kernel::HLERequestContext& ctx) {
@@ -442,9 +456,9 @@ void Y2R_U::SetStandardCoefficient(Kernel::HLERequestContext& ctx) {
 
 void Y2R_U::GetStandardCoefficient(Kernel::HLERequestContext& ctx) {
     IPC::RequestParser rp(ctx, 0x21, 1, 0);
-    u32 index = rp.Pop<u32>();
+    const u32 index = rp.Pop<u32>();
 
-    if (index < ARRAY_SIZE(standard_coefficients)) {
+    if (index < standard_coefficients.size()) {
         IPC::RequestBuilder rb = rp.MakeBuilder(5, 0);
         rb.Push(RESULT_SUCCESS);
         rb.PushRaw(standard_coefficients[index]);
@@ -507,7 +521,7 @@ void Y2R_U::StartConversion(Kernel::HLERequestContext& ctx) {
     Memory::RasterizerFlushVirtualRegion(conversion.dst.address, total_output_size,
                                          Memory::FlushMode::FlushAndInvalidate);
 
-    HW::Y2R::PerformConversion(conversion);
+    HW::Y2R::PerformConversion(system.Memory(), conversion);
 
     completion_event->Signal();
 
@@ -570,10 +584,9 @@ cleanup:
     LOG_DEBUG(Service_Y2R,
               "called input_format={} output_format={} rotation={} block_alignment={} "
               "input_line_width={} input_lines={} standard_coefficient={} reserved={} alpha={:X}",
-              static_cast<u8>(params.input_format), static_cast<u8>(params.output_format),
-              static_cast<u8>(params.rotation), static_cast<u8>(params.block_alignment),
-              params.input_line_width, params.input_lines,
-              static_cast<u8>(params.standard_coefficient), params.padding, params.alpha);
+              params.input_format, params.output_format, params.rotation, params.block_alignment,
+              params.input_line_width, params.input_lines, params.standard_coefficient,
+              params.padding, params.alpha);
 }
 
 void Y2R_U::PingProcess(Kernel::HLERequestContext& ctx) {
@@ -632,7 +645,7 @@ void Y2R_U::GetPackageParameter(Kernel::HLERequestContext& ctx) {
     LOG_DEBUG(Service_Y2R, "called");
 }
 
-Y2R_U::Y2R_U(Core::System& system) : ServiceFramework("y2r:u", 1) {
+Y2R_U::Y2R_U(Core::System& system) : ServiceFramework("y2r:u", 1), system(system) {
     static const FunctionInfo functions[] = {
         {0x00010040, &Y2R_U::SetInputFormat, "SetInputFormat"},
         {0x00020000, &Y2R_U::GetInputFormat, "GetInputFormat"},

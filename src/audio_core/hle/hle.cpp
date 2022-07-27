@@ -2,11 +2,20 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <boost/serialization/array.hpp>
+#include <boost/serialization/base_object.hpp>
+#include <boost/serialization/shared_ptr.hpp>
+#include <boost/serialization/vector.hpp>
+#include <boost/serialization/weak_ptr.hpp>
 #include "audio_core/audio_types.h"
 #ifdef HAVE_MF
 #include "audio_core/hle/wmf_decoder.h"
 #elif HAVE_FFMPEG
 #include "audio_core/hle/ffmpeg_decoder.h"
+#elif ANDROID
+#include "audio_core/hle/mediandk_decoder.h"
+#elif HAVE_FDK
+#include "audio_core/hle/fdk_decoder.h"
 #endif
 #include "audio_core/hle/common.h"
 #include "audio_core/hle/decoder.h"
@@ -22,12 +31,28 @@
 #include "core/core.h"
 #include "core/core_timing.h"
 
+SERIALIZE_EXPORT_IMPL(AudioCore::DspHle)
+
 using InterruptType = Service::DSP::DSP_DSP::InterruptType;
 using Service::DSP::DSP_DSP;
 
 namespace AudioCore {
 
-static constexpr u64 audio_frame_ticks = 1310252ull; ///< Units: ARM11 cycles
+DspHle::DspHle() : DspHle(Core::System::GetInstance().Memory()) {}
+
+template <class Archive>
+void DspHle::serialize(Archive& ar, const unsigned int) {
+    ar& boost::serialization::base_object<DspInterface>(*this);
+    ar&* impl.get();
+}
+SERIALIZE_IMPL(DspHle)
+
+// The value below is the "perfect" mathematical ratio of ARM11 cycles per audio frame, samples per
+// frame * teaklite cycles per sample * 2 ARM11 cycles/teaklite cycle
+// (160 * 4096 * 2) = (1310720)
+//
+// This value has been verified against a rough hardware test with hardware and LLE
+static constexpr u64 audio_frame_ticks = samples_per_frame * 4096 * 2ull; ///< Units: ARM11 cycles
 
 struct DspHle::Impl final {
 public:
@@ -60,7 +85,7 @@ private:
     void AudioTickCallback(s64 cycles_late);
 
     DspState dsp_state = DspState::Off;
-    std::array<std::vector<u8>, num_dsp_pipe> pipe_data;
+    std::array<std::vector<u8>, num_dsp_pipe> pipe_data{};
 
     HLE::DspMemory dsp_memory;
     std::array<HLE::Source, HLE::num_sources> sources{{
@@ -70,14 +95,25 @@ private:
         HLE::Source(15), HLE::Source(16), HLE::Source(17), HLE::Source(18), HLE::Source(19),
         HLE::Source(20), HLE::Source(21), HLE::Source(22), HLE::Source(23),
     }};
-    HLE::Mixers mixers;
+    HLE::Mixers mixers{};
 
     DspHle& parent;
-    Core::TimingEventType* tick_event;
+    Core::TimingEventType* tick_event{};
 
-    std::unique_ptr<HLE::DecoderBase> decoder;
+    std::unique_ptr<HLE::DecoderBase> decoder{};
 
-    std::weak_ptr<DSP_DSP> dsp_dsp;
+    std::weak_ptr<DSP_DSP> dsp_dsp{};
+
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int) {
+        ar& dsp_state;
+        ar& pipe_data;
+        ar& dsp_memory.raw_memory;
+        ar& sources;
+        ar& mixers;
+        ar& dsp_dsp;
+    }
+    friend class boost::serialization::access;
 };
 
 DspHle::Impl::Impl(DspHle& parent_, Memory::MemorySystem& memory) : parent(parent_) {
@@ -87,14 +123,30 @@ DspHle::Impl::Impl(DspHle& parent_, Memory::MemorySystem& memory) : parent(paren
         source.SetMemory(memory);
     }
 
-#ifdef HAVE_MF
+#if defined(HAVE_MF) && defined(HAVE_FFMPEG)
     decoder = std::make_unique<HLE::WMFDecoder>(memory);
-#elif HAVE_FFMPEG
+    if (!decoder->IsValid()) {
+        LOG_WARNING(Audio_DSP, "Unable to load MediaFoundation. Attempting to load FFMPEG instead");
+        decoder = std::make_unique<HLE::FFMPEGDecoder>(memory);
+    }
+#elif defined(HAVE_MF)
+    decoder = std::make_unique<HLE::WMFDecoder>(memory);
+#elif defined(HAVE_FFMPEG)
     decoder = std::make_unique<HLE::FFMPEGDecoder>(memory);
+#elif ANDROID
+    decoder = std::make_unique<HLE::MediaNDKDecoder>(memory);
+#elif defined(HAVE_FDK)
+    decoder = std::make_unique<HLE::FDKDecoder>(memory);
 #else
     LOG_WARNING(Audio_DSP, "No decoder found, this could lead to missing audio");
     decoder = std::make_unique<HLE::NullDecoder>();
 #endif // HAVE_MF
+
+    if (!decoder->IsValid()) {
+        LOG_WARNING(Audio_DSP,
+                    "Unable to load any decoders, this could cause missing audio in some games");
+        decoder = std::make_unique<HLE::NullDecoder>();
+    }
 
     Core::Timing& timing = Core::System::GetInstance().CoreTiming();
     tick_event =
@@ -384,7 +436,7 @@ bool DspHle::Impl::Tick() {
     // shared memory region)
     current_frame = GenerateCurrentFrame();
 
-    parent.OutputFrame(current_frame);
+    parent.OutputFrame(std::move(current_frame));
 
     return true;
 }
