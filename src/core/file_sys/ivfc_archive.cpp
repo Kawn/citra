@@ -5,6 +5,7 @@
 #include <cstring>
 #include <memory>
 #include <utility>
+#include "common/archives.h"
 #include "common/common_types.h"
 #include "common/logging/log.h"
 #include "core/file_sys/ivfc_archive.h"
@@ -12,9 +13,19 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // FileSys namespace
 
+SERIALIZE_EXPORT_IMPL(FileSys::IVFCFile)
+SERIALIZE_EXPORT_IMPL(FileSys::IVFCFileInMemory)
+SERIALIZE_EXPORT_IMPL(FileSys::IVFCDelayGenerator)
+SERIALIZE_EXPORT_IMPL(FileSys::RomFSDelayGenerator)
+SERIALIZE_EXPORT_IMPL(FileSys::ExeFSDelayGenerator)
+
 namespace FileSys {
 
-IVFCArchive::IVFCArchive(std::shared_ptr<RomFSReader> file) : romfs_file(std::move(file)) {}
+IVFCArchive::IVFCArchive(std::shared_ptr<RomFSReader> file,
+                         std::unique_ptr<DelayGenerator> delay_generator_)
+    : romfs_file(std::move(file)) {
+    delay_generator = std::move(delay_generator_);
+}
 
 std::string IVFCArchive::GetName() const {
     return "IVFC";

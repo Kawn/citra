@@ -5,16 +5,24 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <string>
+#include <boost/serialization/version.hpp>
 #include "common/common_types.h"
+#include "core/custom_tex_cache.h"
+#include "core/frontend/applets/mii_selector.h"
 #include "core/frontend/applets/swkbd.h"
+#include "core/frontend/image_interface.h"
 #include "core/loader/loader.h"
 #include "core/memory.h"
 #include "core/perf_stats.h"
 #include "core/telemetry_session.h"
 
-class EmuWindow;
 class ARM_Interface;
+
+namespace Frontend {
+class EmuWindow;
+}
 
 namespace Memory {
 class MemorySystem;
@@ -45,6 +53,12 @@ namespace Cheats {
 class CheatEngine;
 }
 
+namespace VideoDumper {
+class Backend;
+}
+
+class RendererBase;
+
 namespace Core {
 
 class Timing;
@@ -55,7 +69,7 @@ public:
      * Gets the instance of the System singleton class.
      * @returns Reference to the instance of the System singleton class.
      */
-    static System& GetInstance() {
+    [[nodiscard]] static System& GetInstance() {
         return s_instance;
     }
 
@@ -75,9 +89,12 @@ public:
                                             /// generic drivers installed
         ErrorVideoCore_ErrorBelowGL33,      ///< Error in the video core due to the user not having
                                             /// OpenGL 3.3 or higher
+        ErrorSavestate,                     ///< Error saving or loading
         ShutdownRequested,                  ///< Emulated program requested a system shutdown
         ErrorUnknown                        ///< Any other error
     };
+
+    ~System();
 
     /**
      * Run the core CPU loop
@@ -89,28 +106,32 @@ public:
      * @param tight_loop If false, the CPU single-steps.
      * @return Result status, indicating whethor or not the operation succeeded.
      */
-    ResultStatus RunLoop(bool tight_loop = true);
+    [[nodiscard]] ResultStatus RunLoop(bool tight_loop = true);
 
     /**
      * Step the CPU one instruction
      * @return Result status, indicating whethor or not the operation succeeded.
      */
-    ResultStatus SingleStep();
+    [[nodiscard]] ResultStatus SingleStep();
 
     /// Shutdown the emulated system.
-    void Shutdown();
+    void Shutdown(bool is_deserializing = false);
 
     /// Shutdown and then load again
     void Reset();
 
+    enum class Signal : u32 { None, Shutdown, Reset, Save, Load };
+
+    bool SendSignal(Signal signal, u32 param = 0);
+
     /// Request reset of the system
     void RequestReset() {
-        reset_requested = true;
+        SendSignal(Signal::Reset);
     }
 
     /// Request shutdown of the system
     void RequestShutdown() {
-        shutdown_requested = true;
+        SendSignal(Signal::Shutdown);
     }
 
     /**
@@ -120,89 +141,127 @@ public:
      * @param filepath String path to the executable application to load on the host file system.
      * @returns ResultStatus code, indicating if the operation succeeded.
      */
-    ResultStatus Load(EmuWindow& emu_window, const std::string& filepath);
+    [[nodiscard]] ResultStatus Load(Frontend::EmuWindow& emu_window, const std::string& filepath);
 
     /**
      * Indicates if the emulated system is powered on (all subsystems initialized and able to run an
      * application).
      * @returns True if the emulated system is powered on, otherwise false.
      */
-    bool IsPoweredOn() const {
-        return cpu_core != nullptr;
+    [[nodiscard]] bool IsPoweredOn() const {
+        return cpu_cores.size() > 0 &&
+               std::all_of(cpu_cores.begin(), cpu_cores.end(),
+                           [](std::shared_ptr<ARM_Interface> ptr) { return ptr != nullptr; });
+        ;
     }
 
     /**
      * Returns a reference to the telemetry session for this emulation session.
      * @returns Reference to the telemetry session.
      */
-    Core::TelemetrySession& TelemetrySession() const {
+    [[nodiscard]] Core::TelemetrySession& TelemetrySession() const {
         return *telemetry_session;
     }
 
     /// Prepare the core emulation for a reschedule
     void PrepareReschedule();
 
-    PerfStats::Results GetAndResetPerfStats();
+    [[nodiscard]] PerfStats::Results GetAndResetPerfStats();
 
     /**
      * Gets a reference to the emulated CPU.
      * @returns A reference to the emulated CPU.
      */
-    ARM_Interface& CPU() {
-        return *cpu_core;
+
+    [[nodiscard]] ARM_Interface& GetRunningCore() {
+        return *running_core;
+    };
+
+    /**
+     * Gets a reference to the emulated CPU.
+     * @param core_id The id of the core requested.
+     * @returns A reference to the emulated CPU.
+     */
+
+    [[nodiscard]] ARM_Interface& GetCore(u32 core_id) {
+        return *cpu_cores[core_id];
+    };
+
+    [[nodiscard]] u32 GetNumCores() const {
+        return static_cast<u32>(cpu_cores.size());
+    }
+
+    void InvalidateCacheRange(u32 start_address, std::size_t length) {
+        for (const auto& cpu : cpu_cores) {
+            cpu->InvalidateCacheRange(start_address, length);
+        }
     }
 
     /**
      * Gets a reference to the emulated DSP.
      * @returns A reference to the emulated DSP.
      */
-    AudioCore::DspInterface& DSP() {
+    [[nodiscard]] AudioCore::DspInterface& DSP() {
         return *dsp_core;
     }
+
+    [[nodiscard]] RendererBase& Renderer();
 
     /**
      * Gets a reference to the service manager.
      * @returns A reference to the service manager.
      */
-    Service::SM::ServiceManager& ServiceManager();
+    [[nodiscard]] Service::SM::ServiceManager& ServiceManager();
 
     /**
      * Gets a const reference to the service manager.
      * @returns A const reference to the service manager.
      */
-    const Service::SM::ServiceManager& ServiceManager() const;
+    [[nodiscard]] const Service::SM::ServiceManager& ServiceManager() const;
 
     /// Gets a reference to the archive manager
-    Service::FS::ArchiveManager& ArchiveManager();
+    [[nodiscard]] Service::FS::ArchiveManager& ArchiveManager();
 
     /// Gets a const reference to the archive manager
-    const Service::FS::ArchiveManager& ArchiveManager() const;
+    [[nodiscard]] const Service::FS::ArchiveManager& ArchiveManager() const;
 
     /// Gets a reference to the kernel
-    Kernel::KernelSystem& Kernel();
+    [[nodiscard]] Kernel::KernelSystem& Kernel();
 
     /// Gets a const reference to the kernel
-    const Kernel::KernelSystem& Kernel() const;
+    [[nodiscard]] const Kernel::KernelSystem& Kernel() const;
 
     /// Gets a reference to the timing system
-    Timing& CoreTiming();
+    [[nodiscard]] Timing& CoreTiming();
 
     /// Gets a const reference to the timing system
-    const Timing& CoreTiming() const;
+    [[nodiscard]] const Timing& CoreTiming() const;
 
     /// Gets a reference to the memory system
-    Memory::MemorySystem& Memory();
+    [[nodiscard]] Memory::MemorySystem& Memory();
 
     /// Gets a const reference to the memory system
-    const Memory::MemorySystem& Memory() const;
+    [[nodiscard]] const Memory::MemorySystem& Memory() const;
 
     /// Gets a reference to the cheat engine
-    Cheats::CheatEngine& CheatEngine();
+    [[nodiscard]] Cheats::CheatEngine& CheatEngine();
 
     /// Gets a const reference to the cheat engine
-    const Cheats::CheatEngine& CheatEngine() const;
+    [[nodiscard]] const Cheats::CheatEngine& CheatEngine() const;
 
-    PerfStats perf_stats;
+    /// Gets a reference to the custom texture cache system
+    [[nodiscard]] Core::CustomTexCache& CustomTexCache();
+
+    /// Gets a const reference to the custom texture cache system
+    [[nodiscard]] const Core::CustomTexCache& CustomTexCache() const;
+
+    /// Gets a reference to the video dumper backend
+    [[nodiscard]] VideoDumper::Backend& VideoDumper();
+
+    /// Gets a const reference to the video dumper backend
+    [[nodiscard]] const VideoDumper::Backend& VideoDumper() const;
+
+    std::unique_ptr<PerfStats> perf_stats;
     FrameLimiter frame_limiter;
 
     void SetStatus(ResultStatus new_status, const char* details = nullptr) {
@@ -212,21 +271,39 @@ public:
         }
     }
 
-    const std::string& GetStatusDetails() const {
+    [[nodiscard]] const std::string& GetStatusDetails() const {
         return status_details;
     }
 
-    Loader::AppLoader& GetAppLoader() const {
+    [[nodiscard]] Loader::AppLoader& GetAppLoader() const {
         return *app_loader;
     }
 
     /// Frontend Applets
 
+    void RegisterMiiSelector(std::shared_ptr<Frontend::MiiSelector> mii_selector);
+
     void RegisterSoftwareKeyboard(std::shared_ptr<Frontend::SoftwareKeyboard> swkbd);
 
-    std::shared_ptr<Frontend::SoftwareKeyboard> GetSoftwareKeyboard() const {
+    [[nodiscard]] std::shared_ptr<Frontend::MiiSelector> GetMiiSelector() const {
+        return registered_mii_selector;
+    }
+
+    [[nodiscard]] std::shared_ptr<Frontend::SoftwareKeyboard> GetSoftwareKeyboard() const {
         return registered_swkbd;
     }
+
+    /// Image interface
+
+    void RegisterImageInterface(std::shared_ptr<Frontend::ImageInterface> image_interface);
+
+    [[nodiscard]] std::shared_ptr<Frontend::ImageInterface> GetImageInterface() const {
+        return registered_image_interface;
+    }
+
+    void SaveState(u32 slot) const;
+
+    void LoadState(u32 slot);
 
 private:
     /**
@@ -236,7 +313,8 @@ private:
      * @param system_mode The system mode.
      * @return ResultStatus code, indicating if the operation succeeded.
      */
-    ResultStatus Init(EmuWindow& emu_window, u32 system_mode);
+    [[nodiscard]] ResultStatus Init(Frontend::EmuWindow& emu_window, u32 system_mode, u8 n3ds_mode,
+                                    u32 num_cores);
 
     /// Reschedule the core emulation
     void Reschedule();
@@ -245,7 +323,8 @@ private:
     std::unique_ptr<Loader::AppLoader> app_loader;
 
     /// ARM11 CPU core
-    std::unique_ptr<ARM_Interface> cpu_core;
+    std::vector<std::shared_ptr<ARM_Interface>> cpu_cores;
+    ARM_Interface* running_core = nullptr;
 
     /// DSP core
     std::unique_ptr<AudioCore::DspInterface> dsp_core;
@@ -257,13 +336,23 @@ private:
     std::unique_ptr<Core::TelemetrySession> telemetry_session;
 
     /// Service manager
-    std::shared_ptr<Service::SM::ServiceManager> service_manager;
+    std::unique_ptr<Service::SM::ServiceManager> service_manager;
 
     /// Frontend applets
+    std::shared_ptr<Frontend::MiiSelector> registered_mii_selector;
     std::shared_ptr<Frontend::SoftwareKeyboard> registered_swkbd;
 
     /// Cheats manager
     std::unique_ptr<Cheats::CheatEngine> cheat_engine;
+
+    /// Video dumper backend
+    std::unique_ptr<VideoDumper::Backend> video_dumper;
+
+    /// Custom texture cache system
+    std::unique_ptr<Core::CustomTexCache> custom_tex_cache;
+
+    /// Image interface
+    std::shared_ptr<Frontend::ImageInterface> registered_image_interface;
 
     /// RPC Server for scripting support
     std::unique_ptr<RPC::RPCServer> rpc_server;
@@ -277,26 +366,40 @@ private:
 private:
     static System s_instance;
 
+    bool initalized = false;
+
     ResultStatus status = ResultStatus::Success;
     std::string status_details = "";
     /// Saved variables for reset
-    EmuWindow* m_emu_window;
+    Frontend::EmuWindow* m_emu_window;
     std::string m_filepath;
+    u64 title_id;
 
-    std::atomic<bool> reset_requested;
-    std::atomic<bool> shutdown_requested;
+    std::mutex signal_mutex;
+    Signal current_signal;
+    u32 signal_param;
+
+    friend class boost::serialization::access;
+    template <typename Archive>
+    void serialize(Archive& ar, const unsigned int file_version);
 };
 
-inline ARM_Interface& CPU() {
-    return System::GetInstance().CPU();
+[[nodiscard]] inline ARM_Interface& GetRunningCore() {
+    return System::GetInstance().GetRunningCore();
 }
 
-inline AudioCore::DspInterface& DSP() {
+[[nodiscard]] inline ARM_Interface& GetCore(u32 core_id) {
+    return System::GetInstance().GetCore(core_id);
+}
+
+[[nodiscard]] inline u32 GetNumCores() {
+    return System::GetInstance().GetNumCores();
+}
+
+[[nodiscard]] inline AudioCore::DspInterface& DSP() {
     return System::GetInstance().DSP();
 }
 
-inline TelemetrySession& Telemetry() {
-    return System::GetInstance().TelemetrySession();
-}
-
 } // namespace Core
+
+BOOST_CLASS_VERSION(Core::System, 1)

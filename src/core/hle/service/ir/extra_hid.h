@@ -6,6 +6,7 @@
 
 #include <array>
 #include <atomic>
+#include <boost/serialization/array.hpp>
 #include "common/bit_field.h"
 #include "common/swap.h"
 #include "core/frontend/input.h"
@@ -13,6 +14,7 @@
 
 namespace Core {
 struct TimingEventType;
+class Timing;
 } // namespace Core
 
 namespace Service::IR {
@@ -40,7 +42,7 @@ static_assert(sizeof(ExtraHIDResponse) == 6, "HID status response has wrong size
  */
 class ExtraHID final : public IRDevice {
 public:
-    explicit ExtraHID(SendFunc send_func);
+    explicit ExtraHID(SendFunc send_func, Core::Timing& timing);
     ~ExtraHID();
 
     void OnConnect() override;
@@ -56,6 +58,7 @@ private:
     void HandleReadCalibrationDataRequest(const std::vector<u8>& request);
     void LoadInputDevices();
 
+    Core::Timing& timing;
     u8 hid_period;
     Core::TimingEventType* hid_polling_callback_id;
     std::array<u8, 0x40> calibration_data;
@@ -63,6 +66,18 @@ private:
     std::unique_ptr<Input::ButtonDevice> zr;
     std::unique_ptr<Input::AnalogDevice> c_stick;
     std::atomic<bool> is_device_reload_pending;
+
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int) {
+        ar& hid_period;
+        ar& calibration_data; // This isn't writeable for now, but might be in future
+        if (Archive::is_loading::value) {
+            LoadInputDevices(); // zl, zr, c_stick are loaded here
+        }
+    }
+    friend class boost::serialization::access;
 };
 
 } // namespace Service::IR
+
+BOOST_CLASS_EXPORT_KEY(Service::IR::ExtraHID)

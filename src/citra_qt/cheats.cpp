@@ -17,7 +17,7 @@ CheatDialog::CheatDialog(QWidget* parent)
     : QDialog(parent), ui(std::make_unique<Ui::CheatDialog>()) {
     // Setup gui control settings
     ui->setupUi(this);
-    setWindowFlags(Qt::Dialog | Qt::MSWindowsFixedSizeDialogHint);
+    setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
     ui->tableCheats->setColumnWidth(0, 30);
     ui->tableCheats->setColumnWidth(2, 85);
     ui->tableCheats->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Fixed);
@@ -30,16 +30,16 @@ CheatDialog::CheatDialog(QWidget* parent)
         "{:016X}", Core::System::GetInstance().Kernel().GetCurrentProcess()->codeset->program_id);
     ui->labelTitle->setText(tr("Title ID: %1").arg(QString::fromStdString(game_id)));
 
-    connect(ui->buttonClose, &QPushButton::released, this, &CheatDialog::OnCancel);
-    connect(ui->buttonAddCheat, &QPushButton::released, this, &CheatDialog::OnAddCheat);
+    connect(ui->buttonClose, &QPushButton::clicked, this, &CheatDialog::OnCancel);
+    connect(ui->buttonAddCheat, &QPushButton::clicked, this, &CheatDialog::OnAddCheat);
     connect(ui->tableCheats, &QTableWidget::cellClicked, this, &CheatDialog::OnRowSelected);
     connect(ui->lineName, &QLineEdit::textEdited, this, &CheatDialog::OnTextEdited);
     connect(ui->textNotes, &QPlainTextEdit::textChanged, this, &CheatDialog::OnTextEdited);
     connect(ui->textCode, &QPlainTextEdit::textChanged, this, &CheatDialog::OnTextEdited);
 
-    connect(ui->buttonSave, &QPushButton::released,
+    connect(ui->buttonSave, &QPushButton::clicked,
             [this] { SaveCheat(ui->tableCheats->currentRow()); });
-    connect(ui->buttonDelete, &QPushButton::released, this, &CheatDialog::OnDeleteCheat);
+    connect(ui->buttonDelete, &QPushButton::clicked, this, &CheatDialog::OnDeleteCheat);
 
     LoadCheats();
 }
@@ -48,13 +48,14 @@ CheatDialog::~CheatDialog() = default;
 
 void CheatDialog::LoadCheats() {
     cheats = Core::System::GetInstance().CheatEngine().GetCheats();
+    const int cheats_count = static_cast<int>(cheats.size());
 
-    ui->tableCheats->setRowCount(cheats.size());
+    ui->tableCheats->setRowCount(cheats_count);
 
-    for (size_t i = 0; i < cheats.size(); i++) {
+    for (int i = 0; i < cheats_count; i++) {
         QCheckBox* enabled = new QCheckBox();
         enabled->setChecked(cheats[i]->IsEnabled());
-        enabled->setStyleSheet("margin-left:7px;");
+        enabled->setStyleSheet(QStringLiteral("margin-left:7px;"));
         ui->tableCheats->setItem(i, 0, new QTableWidgetItem());
         ui->tableCheats->setCellWidget(i, 0, enabled);
         ui->tableCheats->setItem(
@@ -90,7 +91,7 @@ bool CheatDialog::SaveCheat(int row) {
     }
 
     // Check if the cheat lines are valid
-    auto code_lines = ui->textCode->toPlainText().split("\n", QString::SkipEmptyParts);
+    auto code_lines = ui->textCode->toPlainText().split(QLatin1Char{'\n'}, QString::SkipEmptyParts);
     for (int i = 0; i < code_lines.size(); ++i) {
         Cheats::GatewayCheat::CheatLine cheat_line(code_lines[i].toStdString());
         if (cheat_line.valid)
@@ -148,7 +149,7 @@ void CheatDialog::OnRowSelected(int row, int column) {
         ui->tableCheats->setCurrentCell(last_row, last_col);
         return;
     }
-    if (row < cheats.size()) {
+    if (static_cast<std::size_t>(row) < cheats.size()) {
         if (newly_created) {
             // Remove the newly created dummy item
             newly_created = false;
@@ -195,9 +196,9 @@ void CheatDialog::OnDeleteCheat() {
 
     LoadCheats();
     if (cheats.empty()) {
-        ui->lineName->setText("");
-        ui->textCode->setPlainText("");
-        ui->textNotes->setPlainText("");
+        ui->lineName->clear();
+        ui->textCode->clear();
+        ui->textNotes->clear();
         ui->lineName->setEnabled(false);
         ui->textCode->setEnabled(false);
         ui->textNotes->setEnabled(false);
@@ -231,11 +232,11 @@ void CheatDialog::OnAddCheat() {
 
     // create a dummy item
     ui->tableCheats->setItem(row, 1, new QTableWidgetItem(tr("[new cheat]")));
-    ui->tableCheats->setItem(row, 2, new QTableWidgetItem(""));
-    ui->lineName->setText("");
+    ui->tableCheats->setItem(row, 2, new QTableWidgetItem(QString{}));
+    ui->lineName->clear();
     ui->lineName->setPlaceholderText(tr("[new cheat]"));
-    ui->textCode->setPlainText("");
-    ui->textNotes->setPlainText("");
+    ui->textCode->clear();
+    ui->textNotes->clear();
     ui->lineName->setEnabled(true);
     ui->textCode->setEnabled(true);
     ui->textNotes->setEnabled(true);

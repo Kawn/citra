@@ -3,6 +3,7 @@
 // Refer to the license.txt file included.
 
 #include <vector>
+#include "common/archives.h"
 #include "common/bit_field.h"
 #include "common/microprofile.h"
 #include "common/swap.h"
@@ -21,13 +22,17 @@
 #include "video_core/debug_utils/debug_utils.h"
 #include "video_core/gpu_debugger.h"
 
+SERIALIZE_EXPORT_IMPL(Service::GSP::SessionData)
+SERIALIZE_EXPORT_IMPL(Service::GSP::GSP_GPU)
+SERVICE_CONSTRUCT_IMPL(Service::GSP::GSP_GPU)
+
 // Main graphics debugger object - TODO: Here is probably not the best place for this
 GraphicsDebugger g_debugger;
 
 namespace Service::GSP {
 
 // Beginning address of HW regs
-const u32 REGS_BEGIN = 0x1EB00000;
+constexpr u32 REGS_BEGIN = 0x1EB00000;
 
 namespace ErrCodes {
 enum {
@@ -49,12 +54,6 @@ constexpr ResultCode ERR_REGS_MISALIGNED(ErrorDescription::MisalignedSize, Error
 constexpr ResultCode ERR_REGS_INVALID_SIZE(ErrorDescription::InvalidSize, ErrorModule::GX,
                                            ErrorSummary::InvalidArgument,
                                            ErrorLevel::Usage); // 0xE0E02BEC
-
-/// Maximum number of threads that can be registered at the same time in the GSP module.
-constexpr u32 MaxGSPThreads = 4;
-
-/// Thread ids currently in use by the sessions connected to the GSPGPU service.
-static std::array<bool, MaxGSPThreads> used_thread_ids = {false, false, false, false};
 
 static PAddr VirtualToPhysicalAddress(VAddr addr) {
     if (addr == 0) {
@@ -79,7 +78,7 @@ static PAddr VirtualToPhysicalAddress(VAddr addr) {
     return addr | 0x80000000;
 }
 
-static u32 GetUnusedThreadId() {
+u32 GSP_GPU::GetUnusedThreadId() const {
     for (u32 id = 0; id < MaxGSPThreads; ++id) {
         if (!used_thread_ids[id])
             return id;
@@ -88,7 +87,7 @@ static u32 GetUnusedThreadId() {
 }
 
 /// Gets a pointer to a thread command buffer in GSP shared memory
-static inline u8* GetCommandBuffer(Kernel::SharedPtr<Kernel::SharedMemory> shared_memory,
+static inline u8* GetCommandBuffer(std::shared_ptr<Kernel::SharedMemory> shared_memory,
                                    u32 thread_id) {
     return shared_memory->GetPointer(0x800 + (thread_id * sizeof(CommandBuffer)));
 }
@@ -104,15 +103,16 @@ FrameBufferUpdate* GSP_GPU::GetFrameBufferInfo(u32 thread_id, u32 screen_index) 
 
 /// Gets a pointer to the interrupt relay queue for a given thread index
 static inline InterruptRelayQueue* GetInterruptRelayQueue(
-    Kernel::SharedPtr<Kernel::SharedMemory> shared_memory, u32 thread_id) {
+    std::shared_ptr<Kernel::SharedMemory> shared_memory, u32 thread_id) {
     u8* ptr = shared_memory->GetPointer(sizeof(InterruptRelayQueue) * thread_id);
     return reinterpret_cast<InterruptRelayQueue*>(ptr);
 }
 
-void GSP_GPU::ClientDisconnected(Kernel::SharedPtr<Kernel::ServerSession> server_session) {
-    SessionData* session_data = GetSessionData(server_session);
-    if (active_thread_id == session_data->thread_id)
+void GSP_GPU::ClientDisconnected(std::shared_ptr<Kernel::ServerSession> server_session) {
+    const SessionData* session_data = GetSessionData(server_session);
+    if (active_thread_id == session_data->thread_id) {
         ReleaseRight(session_data);
+    }
     SessionRequestHandler::ClientDisconnected(server_session);
 }
 
@@ -284,36 +284,36 @@ ResultCode SetBufferSwap(u32 screen_id, const FrameBufferInfo& info) {
     PAddr phys_address_left = VirtualToPhysicalAddress(info.address_left);
     PAddr phys_address_right = VirtualToPhysicalAddress(info.address_right);
     if (info.active_fb == 0) {
-        WriteSingleHWReg(base_address + 4 * static_cast<u32>(GPU_REG_INDEX(
-                                                framebuffer_config[screen_id].address_left1)),
+        WriteSingleHWReg(base_address + 4 * static_cast<u32>(GPU_FRAMEBUFFER_REG_INDEX(
+                                                screen_id, address_left1)),
                          phys_address_left);
-        WriteSingleHWReg(base_address + 4 * static_cast<u32>(GPU_REG_INDEX(
-                                                framebuffer_config[screen_id].address_right1)),
+        WriteSingleHWReg(base_address + 4 * static_cast<u32>(GPU_FRAMEBUFFER_REG_INDEX(
+                                                screen_id, address_right1)),
                          phys_address_right);
     } else {
-        WriteSingleHWReg(base_address + 4 * static_cast<u32>(GPU_REG_INDEX(
-                                                framebuffer_config[screen_id].address_left2)),
+        WriteSingleHWReg(base_address + 4 * static_cast<u32>(GPU_FRAMEBUFFER_REG_INDEX(
+                                                screen_id, address_left2)),
                          phys_address_left);
-        WriteSingleHWReg(base_address + 4 * static_cast<u32>(GPU_REG_INDEX(
-                                                framebuffer_config[screen_id].address_right2)),
+        WriteSingleHWReg(base_address + 4 * static_cast<u32>(GPU_FRAMEBUFFER_REG_INDEX(
+                                                screen_id, address_right2)),
                          phys_address_right);
     }
     WriteSingleHWReg(base_address +
-                         4 * static_cast<u32>(GPU_REG_INDEX(framebuffer_config[screen_id].stride)),
+                         4 * static_cast<u32>(GPU_FRAMEBUFFER_REG_INDEX(screen_id, stride)),
                      info.stride);
-    WriteSingleHWReg(base_address + 4 * static_cast<u32>(GPU_REG_INDEX(
-                                            framebuffer_config[screen_id].color_format)),
+    WriteSingleHWReg(base_address +
+                         4 * static_cast<u32>(GPU_FRAMEBUFFER_REG_INDEX(screen_id, color_format)),
                      info.format);
-    WriteSingleHWReg(
-        base_address + 4 * static_cast<u32>(GPU_REG_INDEX(framebuffer_config[screen_id].active_fb)),
-        info.shown_fb);
+    WriteSingleHWReg(base_address +
+                         4 * static_cast<u32>(GPU_FRAMEBUFFER_REG_INDEX(screen_id, active_fb)),
+                     info.shown_fb);
 
     if (Pica::g_debug_context)
         Pica::g_debug_context->OnEvent(Pica::DebugContext::Event::BufferSwapped, nullptr);
 
     if (screen_id == 0) {
         MicroProfileFlip();
-        Core::System::GetInstance().perf_stats.EndGameFrame();
+        Core::System::GetInstance().perf_stats->EndGameFrame();
     }
 
     return RESULT_SUCCESS;
@@ -471,8 +471,9 @@ void GSP_GPU::SignalInterrupt(InterruptId interrupt_id) {
     }
 
     // For normal interrupts, don't do anything if no process has acquired the GPU right.
-    if (active_thread_id == -1)
+    if (active_thread_id == UINT32_MAX) {
         return;
+    }
 
     SignalInterruptForThread(interrupt_id, active_thread_id);
 }
@@ -713,23 +714,23 @@ void GSP_GPU::AcquireRight(Kernel::HLERequestContext& ctx) {
     }
 
     // TODO(Subv): This case should put the caller thread to sleep until the right is released.
-    ASSERT_MSG(active_thread_id == -1, "GPU right has already been acquired");
+    ASSERT_MSG(active_thread_id == UINT32_MAX, "GPU right has already been acquired");
 
     active_thread_id = session_data->thread_id;
 
     rb.Push(RESULT_SUCCESS);
 }
 
-void GSP_GPU::ReleaseRight(SessionData* session_data) {
+void GSP_GPU::ReleaseRight(const SessionData* session_data) {
     ASSERT_MSG(active_thread_id == session_data->thread_id,
                "Wrong thread tried to release GPU right");
-    active_thread_id = -1;
+    active_thread_id = UINT32_MAX;
 }
 
 void GSP_GPU::ReleaseRight(Kernel::HLERequestContext& ctx) {
     IPC::RequestParser rp(ctx, 0x17, 0, 0);
 
-    SessionData* session_data = GetSessionData(ctx.Session());
+    const SessionData* session_data = GetSessionData(ctx.Session());
     ReleaseRight(session_data);
 
     IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
@@ -821,17 +822,21 @@ GSP_GPU::GSP_GPU(Core::System& system) : ServiceFramework("gsp::Gpu", 2), system
     first_initialization = true;
 };
 
-SessionData::SessionData() {
+std::unique_ptr<Kernel::SessionRequestHandler::SessionDataBase> GSP_GPU::MakeSessionData() {
+    return std::make_unique<SessionData>(this);
+}
+
+SessionData::SessionData(GSP_GPU* gsp) : gsp(gsp) {
     // Assign a new thread id to this session when it connects. Note: In the real GSP service this
     // is done through a real thread (svcCreateThread) but we have to simulate it since our HLE
     // services don't have threads.
-    thread_id = GetUnusedThreadId();
-    used_thread_ids[thread_id] = true;
+    thread_id = gsp->GetUnusedThreadId();
+    gsp->used_thread_ids[thread_id] = true;
 }
 
 SessionData::~SessionData() {
     // Free the thread id slot so that other sessions can use it.
-    used_thread_ids[thread_id] = false;
+    gsp->used_thread_ids[thread_id] = false;
 }
 
 } // namespace Service::GSP

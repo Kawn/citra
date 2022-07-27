@@ -4,7 +4,9 @@
 
 #include <algorithm>
 #include <cstring>
+#include <type_traits>
 #include <vector>
+#include "common/archives.h"
 #include "common/assert.h"
 #include "common/bit_field.h"
 #include "common/common_types.h"
@@ -51,6 +53,8 @@
 #define GET_ERRNO errno
 #define closesocket(x) close(x)
 #endif
+
+SERIALIZE_EXPORT_IMPL(Service::SOC::SOC_U)
 
 namespace Service::SOC {
 
@@ -196,11 +200,6 @@ struct CTRPollFD {
         BitField<4, 1, u32> pollout;
         BitField<5, 1, u32> pollnval;
 
-        Events& operator=(const Events& other) {
-            hex = other.hex;
-            return *this;
-        }
-
         /// Translates the resulting events of a Poll operation from platform-specific to 3ds
         /// specific
         static Events TranslateTo3DS(u32 input_event) {
@@ -260,6 +259,8 @@ struct CTRPollFD {
         return result;
     }
 };
+static_assert(std::is_trivially_copyable_v<CTRPollFD>,
+              "CTRPollFD is used with std::memcpy and must be trivially copyable");
 
 /// Union to represent the 3ds' sockaddr structure
 union CTRSockAddr {
@@ -503,19 +504,20 @@ void SOC_U::Accept(Kernel::HLERequestContext& ctx) {
     // preventing graceful shutdown when closing the emulator, this can be fixed by always
     // performing nonblocking operations and spinlock until the data is available
     IPC::RequestParser rp(ctx, 0x04, 2, 2);
-    u32 socket_handle = rp.Pop<u32>();
-    socklen_t max_addr_len = static_cast<socklen_t>(rp.Pop<u32>());
+    const auto socket_handle = rp.Pop<u32>();
+    [[maybe_unused]] const auto max_addr_len = static_cast<socklen_t>(rp.Pop<u32>());
     rp.PopPID();
     sockaddr addr;
     socklen_t addr_len = sizeof(addr);
     u32 ret = static_cast<u32>(::accept(socket_handle, &addr, &addr_len));
 
-    if ((s32)ret != SOCKET_ERROR_VALUE)
+    if (static_cast<s32>(ret) != SOCKET_ERROR_VALUE) {
         open_sockets[ret] = {ret, true};
+    }
 
     CTRSockAddr ctr_addr;
     std::vector<u8> ctr_addr_buf(sizeof(ctr_addr));
-    if ((s32)ret == SOCKET_ERROR_VALUE) {
+    if (static_cast<s32>(ret) == SOCKET_ERROR_VALUE) {
         ret = TranslateError(GET_ERRNO);
     } else {
         ctr_addr = CTRSockAddr::FromPlatform(addr);
@@ -525,7 +527,7 @@ void SOC_U::Accept(Kernel::HLERequestContext& ctx) {
     IPC::RequestBuilder rb = rp.MakeBuilder(2, 2);
     rb.Push(RESULT_SUCCESS);
     rb.Push(ret);
-    rb.PushStaticBuffer(ctr_addr_buf, 0);
+    rb.PushStaticBuffer(std::move(ctr_addr_buf), 0);
 }
 
 void SOC_U::GetHostId(Kernel::HLERequestContext& ctx) {
@@ -633,7 +635,7 @@ void SOC_U::RecvFromOther(Kernel::HLERequestContext& ctx) {
     IPC::RequestBuilder rb = rp.MakeBuilder(2, 4);
     rb.Push(RESULT_SUCCESS);
     rb.Push(ret);
-    rb.PushStaticBuffer(addr_buff, 0);
+    rb.PushStaticBuffer(std::move(addr_buff), 0);
     rb.PushMappedBuffer(buffer);
 }
 
@@ -682,8 +684,8 @@ void SOC_U::RecvFrom(Kernel::HLERequestContext& ctx) {
     rb.Push(RESULT_SUCCESS);
     rb.Push(ret);
     rb.Push(total_received);
-    rb.PushStaticBuffer(output_buff, 0);
-    rb.PushStaticBuffer(addr_buff, 1);
+    rb.PushStaticBuffer(std::move(output_buff), 0);
+    rb.PushStaticBuffer(std::move(addr_buff), 1);
 }
 
 void SOC_U::Poll(Kernel::HLERequestContext& ctx) {
@@ -717,13 +719,13 @@ void SOC_U::Poll(Kernel::HLERequestContext& ctx) {
     IPC::RequestBuilder rb = rp.MakeBuilder(2, 2);
     rb.Push(RESULT_SUCCESS);
     rb.Push(ret);
-    rb.PushStaticBuffer(output_fds, 0);
+    rb.PushStaticBuffer(std::move(output_fds), 0);
 }
 
 void SOC_U::GetSockName(Kernel::HLERequestContext& ctx) {
     IPC::RequestParser rp(ctx, 0x17, 2, 2);
-    u32 socket_handle = rp.Pop<u32>();
-    u32 max_addr_len = rp.Pop<u32>();
+    const auto socket_handle = rp.Pop<u32>();
+    [[maybe_unused]] const auto max_addr_len = rp.Pop<u32>();
     rp.PopPID();
 
     sockaddr dest_addr;
@@ -740,7 +742,7 @@ void SOC_U::GetSockName(Kernel::HLERequestContext& ctx) {
     IPC::RequestBuilder rb = rp.MakeBuilder(2, 2);
     rb.Push(RESULT_SUCCESS);
     rb.Push(ret);
-    rb.PushStaticBuffer(dest_addr_buff, 0);
+    rb.PushStaticBuffer(std::move(dest_addr_buff), 0);
 }
 
 void SOC_U::Shutdown(Kernel::HLERequestContext& ctx) {
@@ -759,26 +761,27 @@ void SOC_U::Shutdown(Kernel::HLERequestContext& ctx) {
 
 void SOC_U::GetPeerName(Kernel::HLERequestContext& ctx) {
     IPC::RequestParser rp(ctx, 0x18, 2, 2);
-    u32 socket_handle = rp.Pop<u32>();
-    u32 max_addr_len = rp.Pop<u32>();
+    const auto socket_handle = rp.Pop<u32>();
+    [[maybe_unused]] const auto max_addr_len = rp.Pop<u32>();
     rp.PopPID();
 
     sockaddr dest_addr;
     socklen_t dest_addr_len = sizeof(dest_addr);
-    int ret = ::getpeername(socket_handle, &dest_addr, &dest_addr_len);
+    const int ret = ::getpeername(socket_handle, &dest_addr, &dest_addr_len);
 
     CTRSockAddr ctr_dest_addr = CTRSockAddr::FromPlatform(dest_addr);
     std::vector<u8> dest_addr_buff(sizeof(ctr_dest_addr));
     std::memcpy(dest_addr_buff.data(), &ctr_dest_addr, sizeof(ctr_dest_addr));
 
     int result = 0;
-    if (ret != 0)
-        ret = TranslateError(GET_ERRNO);
+    if (ret != 0) {
+        result = TranslateError(GET_ERRNO);
+    }
 
     IPC::RequestBuilder rb = rp.MakeBuilder(2, 2);
     rb.Push(RESULT_SUCCESS);
-    rb.Push(ret);
-    rb.PushStaticBuffer(dest_addr_buff, 0);
+    rb.Push(result);
+    rb.PushStaticBuffer(std::move(dest_addr_buff), 0);
 }
 
 void SOC_U::Connect(Kernel::HLERequestContext& ctx) {
@@ -786,8 +789,8 @@ void SOC_U::Connect(Kernel::HLERequestContext& ctx) {
     // preventing graceful shutdown when closing the emulator, this can be fixed by always
     // performing nonblocking operations and spinlock until the data is available
     IPC::RequestParser rp(ctx, 0x06, 2, 4);
-    u32 socket_handle = rp.Pop<u32>();
-    u32 input_addr_len = rp.Pop<u32>();
+    const auto socket_handle = rp.Pop<u32>();
+    [[maybe_unused]] const auto input_addr_len = rp.Pop<u32>();
     rp.PopPID();
     auto input_addr_buf = rp.PopStaticBuffer();
 
@@ -807,7 +810,7 @@ void SOC_U::Connect(Kernel::HLERequestContext& ctx) {
 void SOC_U::InitializeSockets(Kernel::HLERequestContext& ctx) {
     // TODO(Subv): Implement
     IPC::RequestParser rp(ctx, 0x01, 1, 4);
-    u32 memory_block_size = rp.Pop<u32>();
+    [[maybe_unused]] const auto memory_block_size = rp.Pop<u32>();
     rp.PopPID();
     rp.PopObject<Kernel::SharedMemory>();
 
@@ -854,17 +857,17 @@ void SOC_U::GetSockOpt(Kernel::HLERequestContext& ctx) {
     rb.Push(RESULT_SUCCESS);
     rb.Push(err);
     rb.Push(static_cast<u32>(optlen));
-    rb.PushStaticBuffer(optval, 0);
+    rb.PushStaticBuffer(std::move(optval), 0);
 }
 
 void SOC_U::SetSockOpt(Kernel::HLERequestContext& ctx) {
     IPC::RequestParser rp(ctx, 0x12, 4, 4);
-    u32 socket_handle = rp.Pop<u32>();
-    u32 level = rp.Pop<u32>();
-    s32 optname = rp.Pop<s32>();
-    socklen_t optlen = static_cast<socklen_t>(rp.Pop<u32>());
+    const auto socket_handle = rp.Pop<u32>();
+    const auto level = rp.Pop<u32>();
+    const auto optname = rp.Pop<s32>();
+    [[maybe_unused]] const auto optlen = static_cast<socklen_t>(rp.Pop<u32>());
     rp.PopPID();
-    auto optval = rp.PopStaticBuffer();
+    const auto optval = rp.PopStaticBuffer();
 
     s32 err = 0;
 
@@ -945,7 +948,7 @@ void SOC_U::GetAddrInfoImpl(Kernel::HLERequestContext& ctx) {
     rb.Push(RESULT_SUCCESS);
     rb.Push(ret);
     rb.Push(count);
-    rb.PushStaticBuffer(out_buff, 0);
+    rb.PushStaticBuffer(std::move(out_buff), 0);
 }
 
 void SOC_U::GetNameInfoImpl(Kernel::HLERequestContext& ctx) {
@@ -973,8 +976,8 @@ void SOC_U::GetNameInfoImpl(Kernel::HLERequestContext& ctx) {
     IPC::RequestBuilder rb = rp.MakeBuilder(2, 4);
     rb.Push(RESULT_SUCCESS);
     rb.Push(ret);
-    rb.PushStaticBuffer(host, 0);
-    rb.PushStaticBuffer(serv, 1);
+    rb.PushStaticBuffer(std::move(host), 0);
+    rb.PushStaticBuffer(std::move(serv), 1);
 }
 
 SOC_U::SOC_U() : ServiceFramework("soc:U") {

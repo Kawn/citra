@@ -7,6 +7,7 @@
 #include <memory>
 #include <vector>
 #include <fmt/format.h>
+#include "common/archives.h"
 #include "common/common_types.h"
 #include "common/file_util.h"
 #include "core/file_sys/archive_systemsavedata.h"
@@ -17,9 +18,11 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // FileSys namespace
 
+SERIALIZE_EXPORT_IMPL(FileSys::ArchiveFactory_SystemSaveData)
+
 namespace FileSys {
 
-std::string GetSystemSaveDataPath(const std::string& mount_point, const Path& path) {
+std::string GetSystemSaveDataPath(std::string_view mount_point, const Path& path) {
     const std::vector<u8> vec_data = path.AsBinary();
     u32 save_low;
     u32 save_high;
@@ -28,7 +31,7 @@ std::string GetSystemSaveDataPath(const std::string& mount_point, const Path& pa
     return fmt::format("{}{:08X}/{:08X}/", mount_point, save_low, save_high);
 }
 
-std::string GetSystemSaveDataContainerPath(const std::string& mount_point) {
+std::string GetSystemSaveDataContainerPath(std::string_view mount_point) {
     return fmt::format("{}data/{}/sysdata/", mount_point, SYSTEM_ID);
 }
 
@@ -46,7 +49,7 @@ Path ConstructSystemSaveDataBinaryPath(u32 high, u32 low) {
     for (unsigned i = 0; i < 4; ++i)
         binary_path.push_back((low >> (8 * i)) & 0xFF);
 
-    return {binary_path};
+    return {std::move(binary_path)};
 }
 
 ArchiveFactory_SystemSaveData::ArchiveFactory_SystemSaveData(const std::string& nand_path)

@@ -45,6 +45,7 @@ protected:
     void Send(const std::vector<u8>& data);
 
 private:
+    // NOTE: This value is *not* serialized because it's always passed in the constructor
     const SendFunc send_func;
 };
 
@@ -162,11 +163,19 @@ private:
 
     void PutToReceive(const std::vector<u8>& payload);
 
-    Kernel::SharedPtr<Kernel::Event> conn_status_event, send_event, receive_event;
-    Kernel::SharedPtr<Kernel::SharedMemory> shared_memory;
-    IRDevice* connected_device{nullptr};
+    std::shared_ptr<Kernel::Event> conn_status_event, send_event, receive_event;
+    std::shared_ptr<Kernel::SharedMemory> shared_memory;
+    bool connected_device;
     std::unique_ptr<BufferManager> receive_buffer;
     std::unique_ptr<ExtraHID> extra_hid;
+
+private:
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int);
+    friend class boost::serialization::access;
 };
 
 } // namespace Service::IR
+
+BOOST_CLASS_EXPORT_KEY(Service::IR::IR_USER)
+SERVICE_CONSTRUCT(Service::IR::IR_USER)

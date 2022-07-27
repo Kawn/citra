@@ -5,12 +5,20 @@
 #pragma once
 
 #include <array>
+#include <deque>
 #include <future>
 #include <memory>
 #include <vector>
+#include <boost/serialization/array.hpp>
+#include <boost/serialization/deque.hpp>
+#include <boost/serialization/shared_ptr.hpp>
+#include <boost/serialization/unique_ptr.hpp>
+#include <boost/serialization/version.hpp>
 #include "common/common_types.h"
 #include "common/swap.h"
+#include "core/global.h"
 #include "core/hle/result.h"
+#include "core/hle/service/cam/cam_params.h"
 #include "core/hle/service/service.h"
 
 namespace Core {
@@ -30,120 +38,6 @@ class Process;
 }
 
 namespace Service::CAM {
-
-enum CameraIndex {
-    OuterRightCamera = 0,
-    InnerCamera = 1,
-    OuterLeftCamera = 2,
-
-    NumCameras = 3,
-};
-
-enum class Effect : u8 {
-    None = 0,
-    Mono = 1,
-    Sepia = 2,
-    Negative = 3,
-    Negafilm = 4,
-    Sepia01 = 5,
-};
-
-enum class Flip : u8 {
-    None = 0,
-    Horizontal = 1,
-    Vertical = 2,
-    Reverse = 3,
-};
-
-enum class Size : u8 {
-    VGA = 0,
-    QVGA = 1,
-    QQVGA = 2,
-    CIF = 3,
-    QCIF = 4,
-    DS_LCD = 5,
-    DS_LCDx4 = 6,
-    CTR_TOP_LCD = 7,
-    CTR_BOTTOM_LCD = QVGA,
-};
-
-enum class FrameRate : u8 {
-    Rate_15 = 0,
-    Rate_15_To_5 = 1,
-    Rate_15_To_2 = 2,
-    Rate_10 = 3,
-    Rate_8_5 = 4,
-    Rate_5 = 5,
-    Rate_20 = 6,
-    Rate_20_To_5 = 7,
-    Rate_30 = 8,
-    Rate_30_To_5 = 9,
-    Rate_15_To_10 = 10,
-    Rate_20_To_10 = 11,
-    Rate_30_To_10 = 12,
-};
-
-enum class ShutterSoundType : u8 {
-    Normal = 0,
-    Movie = 1,
-    MovieEnd = 2,
-};
-
-enum class WhiteBalance : u8 {
-    BalanceAuto = 0,
-    Balance3200K = 1,
-    Balance4150K = 2,
-    Balance5200K = 3,
-    Balance6000K = 4,
-    Balance7000K = 5,
-    BalanceMax = 6,
-    BalanceNormal = BalanceAuto,
-    BalanceTungsten = Balance3200K,
-    BalanceWhiteFluorescentLight = Balance4150K,
-    BalanceDaylight = Balance5200K,
-    BalanceCloudy = Balance6000K,
-    BalanceHorizon = Balance6000K,
-    BalanceShade = Balance7000K,
-};
-
-enum class PhotoMode : u8 {
-    Normal = 0,
-    Portrait = 1,
-    Landscape = 2,
-    Nightview = 3,
-    Letter0 = 4,
-};
-
-enum class LensCorrection : u8 {
-    Off = 0,
-    On70 = 1,
-    On90 = 2,
-    Dark = Off,
-    Normal = On70,
-    Bright = On90,
-};
-
-enum class Contrast : u8 {
-    Pattern01 = 1,
-    Pattern02 = 2,
-    Pattern03 = 3,
-    Pattern04 = 4,
-    Pattern05 = 5,
-    Pattern06 = 6,
-    Pattern07 = 7,
-    Pattern08 = 8,
-    Pattern09 = 9,
-    Pattern10 = 10,
-    Pattern11 = 11,
-    Low = Pattern05,
-    Normal = Pattern06,
-    High = Pattern07,
-};
-
-enum class OutputFormat : u8 {
-    YUV422 = 0,
-    RGB565 = 1,
-};
 
 /// Stereo camera calibration data.
 struct StereoCameraCalibrationData {
@@ -179,6 +73,18 @@ struct Resolution {
     u16 crop_y0;
     u16 crop_x1;
     u16 crop_y1;
+
+private:
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int) {
+        ar& width;
+        ar& height;
+        ar& crop_x0;
+        ar& crop_y0;
+        ar& crop_x1;
+        ar& crop_y1;
+    }
+    friend class boost::serialization::access;
 };
 
 struct PackageParameterWithoutContext {
@@ -617,6 +523,21 @@ public:
         void SynchronizeVsyncTiming(Kernel::HLERequestContext& ctx);
 
         /**
+         * Gets the vsync timing record of the specified camera for the specified number of signals.
+         *  Inputs:
+         *      0: 0x002A0080
+         *      1: Port
+         *      2: Number of timings to get
+         *      64: ((PastTimings * 8) << 14) | 2
+         *      65: s64* TimingsOutput
+         *  Outputs:
+         *      0: 0x002A0042
+         *      1: ResultCode
+         *      2-3: Output static buffer
+         */
+        void GetLatestVsyncTiming(Kernel::HLERequestContext& ctx);
+
+        /**
          * Returns calibration data relating the outside cameras to each other, for use in AR
          * applications.
          *
@@ -710,12 +631,13 @@ public:
          */
         void DriverFinalize(Kernel::HLERequestContext& ctx);
 
-    private:
+    protected:
         std::shared_ptr<Module> cam;
     };
 
 private:
     void CompletionEventCallBack(u64 port_id, s64);
+    void VsyncInterruptEventCallBack(u64 port_id, s64 cycles_late);
 
     // Starts a receiving process on the specified port. This can only be called when is_busy = true
     // and is_receiving = false.
@@ -734,56 +656,117 @@ private:
     ResultCode SetPackageParameter(const PackageParameterType& package);
 
     struct ContextConfig {
-        Flip flip;
-        Effect effect;
-        OutputFormat format;
-        Resolution resolution;
+        Flip flip{Flip::None};
+        Effect effect{Effect::None};
+        OutputFormat format{OutputFormat::YUV422};
+        Resolution resolution = {0, 0, 0, 0, 0, 0};
+
+    private:
+        template <class Archive>
+        void serialize(Archive& ar, const unsigned int) {
+            ar& flip;
+            ar& effect;
+            ar& format;
+            ar& resolution;
+        }
+        friend class boost::serialization::access;
     };
 
     struct CameraConfig {
         std::unique_ptr<Camera::CameraInterface> impl;
         std::array<ContextConfig, 2> contexts;
-        int current_context;
-        FrameRate frame_rate;
+        int current_context{0};
+        FrameRate frame_rate{FrameRate::Rate_15};
+
+    private:
+        template <class Archive>
+        void serialize(Archive& ar, const unsigned int file_version) {
+            // For compatibility: put a nullptr here
+            if (file_version == 0) {
+                std::unique_ptr<Camera::CameraInterface> x;
+                ar& x;
+            }
+            ar& contexts;
+            ar& current_context;
+            ar& frame_rate;
+        }
+        friend class boost::serialization::access;
     };
 
     struct PortConfig {
-        int camera_id;
+        int camera_id{0};
 
-        bool is_active;            // set when the port is activated by an Activate call.
-        bool is_pending_receiving; // set if SetReceiving is called when is_busy = false. When
-        // StartCapture is called then, this will trigger a receiving
-        // process and reset itself.
-        bool is_busy;      // set when StartCapture is called and reset when StopCapture is called.
-        bool is_receiving; // set when there is an ongoing receiving process.
+        bool is_active{false}; // set when the port is activated by an Activate call.
 
-        bool is_trimming;
-        u16 x0; // x-coordinate of starting position for trimming
-        u16 y0; // y-coordinate of starting position for trimming
-        u16 x1; // x-coordinate of ending position for trimming
-        u16 y1; // y-coordinate of ending position for trimming
+        // set if SetReceiving is called when is_busy = false. When StartCapture is called then,
+        // this will trigger a receiving process and reset itself.
+        bool is_pending_receiving{false};
 
-        u16 transfer_bytes;
+        // set when StartCapture is called and reset when StopCapture is called.
+        bool is_busy{false};
 
-        Kernel::SharedPtr<Kernel::Event> completion_event;
-        Kernel::SharedPtr<Kernel::Event> buffer_error_interrupt_event;
-        Kernel::SharedPtr<Kernel::Event> vsync_interrupt_event;
+        bool is_receiving{false}; // set when there is an ongoing receiving process.
+
+        bool is_trimming{false};
+        u16 x0{0}; // x-coordinate of starting position for trimming
+        u16 y0{0}; // y-coordinate of starting position for trimming
+        u16 x1{0}; // x-coordinate of ending position for trimming
+        u16 y1{0}; // y-coordinate of ending position for trimming
+
+        u16 transfer_bytes{256};
+
+        std::shared_ptr<Kernel::Event> completion_event;
+        std::shared_ptr<Kernel::Event> buffer_error_interrupt_event;
+        std::shared_ptr<Kernel::Event> vsync_interrupt_event;
+
+        std::deque<s64> vsync_timings;
 
         std::future<std::vector<u16>> capture_result; // will hold the received frame.
-        Kernel::Process* dest_process;
-        VAddr dest;    // the destination address of the receiving process
-        u32 dest_size; // the destination size of the receiving process
+        Kernel::Process* dest_process{nullptr};
+        VAddr dest{0};    // the destination address of the receiving process
+        u32 dest_size{0}; // the destination size of the receiving process
 
         void Clear();
+
+    private:
+        template <class Archive>
+        void serialize(Archive& ar, const unsigned int) {
+            ar& camera_id;
+            ar& is_active;
+            ar& is_pending_receiving;
+            ar& is_busy;
+            ar& is_receiving;
+            ar& is_trimming;
+            ar& x0;
+            ar& y0;
+            ar& x1;
+            ar& y1;
+            ar& transfer_bytes;
+            ar& completion_event;
+            ar& buffer_error_interrupt_event;
+            ar& vsync_interrupt_event;
+            ar& vsync_timings;
+            // Ignore capture_result. In-progress captures might be affected but this is OK.
+            ar& dest_process;
+            ar& dest;
+            ar& dest_size;
+        }
+        friend class boost::serialization::access;
     };
 
     void LoadCameraImplementation(CameraConfig& camera, int camera_id);
 
     Core::System& system;
+    bool initialized{};
     std::array<CameraConfig, NumCameras> cameras;
     std::array<PortConfig, 2> ports;
     Core::TimingEventType* completion_event_callback;
+    Core::TimingEventType* vsync_interrupt_event_callback;
     std::atomic<bool> is_camera_reload_pending{false};
+
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int file_version);
+    friend class boost::serialization::access;
 };
 
 std::shared_ptr<Module> GetModule(Core::System& system);
@@ -791,3 +774,7 @@ std::shared_ptr<Module> GetModule(Core::System& system);
 void InstallInterfaces(Core::System& system);
 
 } // namespace Service::CAM
+
+SERVICE_CONSTRUCT(Service::CAM::Module)
+BOOST_CLASS_VERSION(Service::CAM::Module, 1)
+BOOST_CLASS_VERSION(Service::CAM::Module::CameraConfig, 1)

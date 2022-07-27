@@ -7,6 +7,7 @@
 #include <array>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 #include "common/common_types.h"
 #include "core/hle/service/service.h"
@@ -47,6 +48,11 @@ enum SystemLanguage {
 
 enum SoundOutputMode { SOUND_MONO = 0, SOUND_STEREO = 1, SOUND_SURROUND = 2 };
 
+struct EULAVersion {
+    u8 minor;
+    u8 major;
+};
+
 /// Block header in the config savedata file
 struct SaveConfigBlockEntry {
     u32 block_id;       ///< The id of the current block
@@ -85,6 +91,35 @@ static const std::array<u16, 187> country_codes = {{
     C("AE"), C("IN"), C("EG"), C("OM"), C("QA"), C("KW"), C("SA"), C("SY"), // 168-175
     C("BH"), C("JO"), 0,       0,       0,       0,       0,       0,       // 176-183
     C("SM"), C("VA"), C("BM"),                                              // 184-186
+}};
+
+// Based on PKHeX's lists of subregions at
+// https://github.com/kwsch/PKHeX/tree/master/PKHeX.Core/Resources/text/locale3DS/subregions
+static const std::array<u8, 187> default_subregion = {{
+    0, 2, 0,  0, 0, 0, 0, 0, // 0-7
+    1, 2, 2,  1, 1, 1, 2, 2, // 8-15
+    2, 1, 2,  1, 2, 2, 2, 1, // 16-23
+    2, 2, 2,  1, 1, 1, 2, 2, // 24-31
+    2, 2, 2,  1, 2, 1, 1, 2, // 32-39
+    2, 2, 2,  2, 1, 1, 2, 2, // 40-47
+    1, 2, 2,  1, 2, 0, 0, 0, // 48-55
+    0, 0, 0,  0, 0, 0, 0, 0, // 56-63
+    2, 2, 2,  2, 2, 1, 2, 6, // 64-71
+    1, 2, 18, 1, 8, 2, 2, 2, // 72-79
+    2, 1, 2,  2, 1, 2, 1, 2, // 80-87
+    1, 1, 1,  1, 1, 1, 2, 2, // 88-95
+    7, 2, 2,  2, 9, 1, 2, 1, // 96-103
+    2, 2, 2,  2, 2, 2, 2, 1, // 104-111
+    1, 1, 1,  1, 1, 1, 1, 1, // 112-119
+    1, 1, 1,  1, 1, 1, 1, 1, // 120-127
+    2, 0, 0,  0, 0, 0, 0, 0, // 128-135
+    2, 0, 0,  0, 0, 0, 0, 0, // 136-143
+    1, 0, 0,  0, 0, 0, 0, 0, // 144-151
+    0, 1, 0,  0, 2, 0, 0, 0, // 152-159
+    2, 0, 0,  0, 0, 0, 0, 0, // 160-167
+    2, 2, 0,  0, 0, 0, 2, 0, // 168-175
+    0, 0, 0,  0, 0, 0, 0, 0, // 176-183
+    1, 1, 1,                 // 184-186
 }};
 
 class Module final {
@@ -239,7 +274,7 @@ public:
             (this->*function)(ctx, id);
         }
 
-    private:
+    protected:
         std::shared_ptr<Module> cfg;
     };
 
@@ -366,6 +401,7 @@ public:
 
     /**
      * Sets the country code in config savegame.
+     * The state code is set to a default value.
      * @param country_code the country code to set
      */
     void SetCountryCode(u8 country_code);
@@ -377,13 +413,27 @@ public:
     u8 GetCountryCode();
 
     /**
-     * Generates a new random console unique id.
-     * @param random_number a random generated 16bit number stored at 0x90002, used for generating
-     * the
-     * console_id
-     * @param console_id the randomly created console id
+     * Sets the country and state codes in config savegame.
+     * @param country_code the country code to set
+     * @param state_code the state code to set
      */
-    void GenerateConsoleUniqueId(u32& random_number, u64& console_id);
+    void SetCountryInfo(u8 country_code, u8 state_code);
+
+    /**
+     * Gets the state code from config savegame.
+     * @returns the state code
+     */
+    u8 GetStateCode();
+
+    /**
+     * Generates a new random console unique id.
+     *
+     * @returns A pair containing a random number and a random console ID.
+     *
+     * @note The random number is a random generated 16bit number stored at 0x90002, used for
+     *       generating the console ID.
+     */
+    std::pair<u32, u64> GenerateConsoleUniqueId() const;
 
     /**
      * Sets the random_number and the  console unique id in the config savegame.
@@ -399,6 +449,18 @@ public:
     u64 GetConsoleUniqueId();
 
     /**
+     * Sets the accepted EULA version in the config savegame.
+     * @param version the version to set
+     */
+    void SetEULAVersion(const EULAVersion& version);
+
+    /**
+     * Gets the accepted EULA version from config savegame.
+     * @returns the EULA version
+     */
+    EULAVersion GetEULAVersion();
+
+    /**
      * Writes the config savegame memory buffer to the config savegame file in the filesystem
      * @returns ResultCode indicating the result of the operation, 0 on success
      */
@@ -409,6 +471,10 @@ private:
     std::array<u8, CONFIG_SAVEFILE_SIZE> cfg_config_file_buffer;
     std::unique_ptr<FileSys::ArchiveBackend> cfg_system_save_data_archive;
     u32 preferred_region_code = 0;
+
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int);
+    friend class boost::serialization::access;
 };
 
 std::shared_ptr<Module> GetModule(Core::System& system);
@@ -419,3 +485,5 @@ void InstallInterfaces(Core::System& system);
 std::string GetConsoleIdHash(Core::System& system);
 
 } // namespace Service::CFG
+
+BOOST_CLASS_EXPORT_KEY(Service::CFG::Module)

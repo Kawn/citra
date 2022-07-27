@@ -4,7 +4,8 @@
 
 #include <array>
 #include <cstddef>
-#include <cstring>
+#include <string_view>
+#include <fmt/format.h>
 #include "common/assert.h"
 #include "common/bit_field.h"
 #include "common/bit_set.h"
@@ -30,7 +31,7 @@ using VSOutputAttributes = RasterizerRegs::VSOutputAttributes;
 
 namespace OpenGL {
 
-static const std::string UniformBlockDef = R"(
+constexpr std::string_view UniformBlockDef = R"(
 #define NUM_TEV_STAGES 6
 #define NUM_LIGHTS 8
 #define NUM_LIGHTING_SAMPLERS 24
@@ -81,11 +82,11 @@ layout (std140) uniform shader_data {
 static std::string GetVertexInterfaceDeclaration(bool is_output, bool separable_shader) {
     std::string out;
 
-    auto append_variable = [&](const char* var, int location) {
+    const auto append_variable = [&](std::string_view var, int location) {
         if (separable_shader) {
-            out += "layout (location=" + std::to_string(location) + ") ";
+            out += fmt::format("layout (location={}) ", location);
         }
-        out += std::string(is_output ? "out " : "in ") + var + ";\n";
+        out += fmt::format("{}{};\n", is_output ? "out " : "in ", var);
     };
 
     append_variable("vec4 primary_color", ATTRIBUTE_COLOR);
@@ -101,7 +102,9 @@ static std::string GetVertexInterfaceDeclaration(bool is_output, bool separable_
         out += R"(
 out gl_PerVertex {
     vec4 gl_Position;
+#if !defined(CITRA_GLES) || defined(GL_EXT_clip_cull_distance)
     float gl_ClipDistance[2];
+#endif // !defined(CITRA_GLES) || defined(GL_EXT_clip_cull_distance)
 };
 )";
     }
@@ -110,7 +113,7 @@ out gl_PerVertex {
 }
 
 PicaFSConfig PicaFSConfig::BuildFromRegs(const Pica::Regs& regs) {
-    PicaFSConfig res;
+    PicaFSConfig res{};
 
     auto& state = res.state;
 
@@ -125,6 +128,17 @@ PicaFSConfig PicaFSConfig::BuildFromRegs(const Pica::Regs& regs) {
     state.texture0_type = regs.texturing.texture0.type;
 
     state.texture2_use_coord1 = regs.texturing.main_config.texture2_use_coord1 != 0;
+
+    if (GLES) {
+        // With GLES, we need this in the fragment shader to emulate logic operations
+        state.alphablend_enable =
+            Pica::g_state.regs.framebuffer.output_merger.alphablend_enable == 1;
+        state.logic_op = regs.framebuffer.output_merger.logic_op;
+    } else {
+        // We don't need these otherwise, reset them to avoid unnecessary shader generation
+        state.alphablend_enable = {};
+        state.logic_op = {};
+    }
 
     // Copy relevant tev stages fields.
     // We don't sync const_color here because of the high variance, it is a
@@ -266,37 +280,21 @@ void PicaGSConfigCommonRaw::Init(const Pica::Regs& regs) {
 
     semantic_maps.fill({16, 0});
     for (u32 attrib = 0; attrib < regs.rasterizer.vs_output_total; ++attrib) {
-        std::array<VSOutputAttributes::Semantic, 4> semantics = {
-            regs.rasterizer.vs_output_attributes[attrib].map_x,
-            regs.rasterizer.vs_output_attributes[attrib].map_y,
-            regs.rasterizer.vs_output_attributes[attrib].map_z,
-            regs.rasterizer.vs_output_attributes[attrib].map_w};
+        const std::array semantics{
+            regs.rasterizer.vs_output_attributes[attrib].map_x.Value(),
+            regs.rasterizer.vs_output_attributes[attrib].map_y.Value(),
+            regs.rasterizer.vs_output_attributes[attrib].map_z.Value(),
+            regs.rasterizer.vs_output_attributes[attrib].map_w.Value(),
+        };
         for (u32 comp = 0; comp < 4; ++comp) {
             const auto semantic = semantics[comp];
             if (static_cast<std::size_t>(semantic) < 24) {
                 semantic_maps[static_cast<std::size_t>(semantic)] = {attrib, comp};
             } else if (semantic != VSOutputAttributes::INVALID) {
-                LOG_ERROR(Render_OpenGL, "Invalid/unknown semantic id: {}",
-                          static_cast<u32>(semantic));
+                LOG_ERROR(Render_OpenGL, "Invalid/unknown semantic id: {}", semantic);
             }
         }
     }
-}
-
-void PicaGSConfigRaw::Init(const Pica::Regs& regs, Pica::Shader::ShaderSetup& setup) {
-    PicaShaderConfigCommon::Init(regs.gs, setup);
-    PicaGSConfigCommonRaw::Init(regs);
-
-    num_inputs = regs.gs.max_input_attribute_index + 1;
-    input_map.fill(16);
-
-    for (u32 attr = 0; attr < num_inputs; ++attr) {
-        input_map[regs.gs.GetRegisterForAttribute(attr)] = attr;
-    }
-
-    attributes_per_vertex = regs.pipeline.vs_outmap_total_minus_1_a + 1;
-
-    gs_output_attributes = num_outputs;
 }
 
 /// Detects if a TEV stage is configured to be skipped (to avoid generating unnecessary code)
@@ -317,8 +315,9 @@ static std::string SampleTexture(const PicaFSConfig& config, unsigned texture_un
         // Only unit 0 respects the texturing type
         switch (state.texture0_type) {
         case TexturingRegs::TextureConfig::Texture2D:
-            return "texture(tex0, texcoord0)";
+            return "textureLod(tex0, texcoord0, getLod(texcoord0 * vec2(textureSize(tex0, 0))))";
         case TexturingRegs::TextureConfig::Projection2D:
+            // TODO (wwylele): find the exact LOD formula for projection texture
             return "textureProj(tex0, vec3(texcoord0, texcoord0_w))";
         case TexturingRegs::TextureConfig::TextureCube:
             return "texture(tex_cube, vec3(texcoord0, texcoord0_w))";
@@ -329,18 +328,17 @@ static std::string SampleTexture(const PicaFSConfig& config, unsigned texture_un
         case TexturingRegs::TextureConfig::Disabled:
             return "vec4(0.0)";
         default:
-            LOG_CRITICAL(HW_GPU, "Unhandled texture type {:x}",
-                         static_cast<int>(state.texture0_type));
+            LOG_CRITICAL(HW_GPU, "Unhandled texture type {:x}", state.texture0_type);
             UNIMPLEMENTED();
             return "texture(tex0, texcoord0)";
         }
     case 1:
-        return "texture(tex1, texcoord1)";
+        return "textureLod(tex1, texcoord1, getLod(texcoord1 * vec2(textureSize(tex1, 0))))";
     case 2:
         if (state.texture2_use_coord1)
-            return "texture(tex2, texcoord1)";
+            return "textureLod(tex2, texcoord1, getLod(texcoord1 * vec2(textureSize(tex2, 0))))";
         else
-            return "texture(tex2, texcoord2)";
+            return "textureLod(tex2, texcoord2, getLod(texcoord2 * vec2(textureSize(tex2, 0))))";
     case 3:
         if (state.proctex.enable) {
             return "ProcTex()";
@@ -356,8 +354,7 @@ static std::string SampleTexture(const PicaFSConfig& config, unsigned texture_un
 
 /// Writes the specified TEV stage source component(s)
 static void AppendSource(std::string& out, const PicaFSConfig& config,
-                         TevStageConfig::Source source, const std::string& index_name) {
-    const auto& state = config.state;
+                         TevStageConfig::Source source, std::string_view index_name) {
     using Source = TevStageConfig::Source;
     switch (source) {
     case Source::PrimaryColor:
@@ -385,14 +382,16 @@ static void AppendSource(std::string& out, const PicaFSConfig& config,
         out += "combiner_buffer";
         break;
     case Source::Constant:
-        ((out += "const_color[") += index_name) += ']';
+        out += "const_color[";
+        out += index_name;
+        out += ']';
         break;
     case Source::Previous:
         out += "last_tex_env_out";
         break;
     default:
         out += "vec4(0.0)";
-        LOG_CRITICAL(Render_OpenGL, "Unknown source op {}", static_cast<u32>(source));
+        LOG_CRITICAL(Render_OpenGL, "Unknown source op {}", source);
         break;
     }
 }
@@ -400,7 +399,7 @@ static void AppendSource(std::string& out, const PicaFSConfig& config,
 /// Writes the color components to use for the specified TEV stage color modifier
 static void AppendColorModifier(std::string& out, const PicaFSConfig& config,
                                 TevStageConfig::ColorModifier modifier,
-                                TevStageConfig::Source source, const std::string& index_name) {
+                                TevStageConfig::Source source, std::string_view index_name) {
     using ColorModifier = TevStageConfig::ColorModifier;
     switch (modifier) {
     case ColorModifier::SourceColor:
@@ -450,7 +449,7 @@ static void AppendColorModifier(std::string& out, const PicaFSConfig& config,
         break;
     default:
         out += "vec3(0.0)";
-        LOG_CRITICAL(Render_OpenGL, "Unknown color modifier op {}", static_cast<u32>(modifier));
+        LOG_CRITICAL(Render_OpenGL, "Unknown color modifier op {}", modifier);
         break;
     }
 }
@@ -499,52 +498,49 @@ static void AppendAlphaModifier(std::string& out, const PicaFSConfig& config,
         break;
     default:
         out += "0.0";
-        LOG_CRITICAL(Render_OpenGL, "Unknown alpha modifier op {}", static_cast<u32>(modifier));
+        LOG_CRITICAL(Render_OpenGL, "Unknown alpha modifier op {}", modifier);
         break;
     }
 }
 
 /// Writes the combiner function for the color components for the specified TEV stage operation
 static void AppendColorCombiner(std::string& out, TevStageConfig::Operation operation,
-                                const std::string& variable_name) {
+                                std::string_view variable_name) {
     out += "clamp(";
     using Operation = TevStageConfig::Operation;
     switch (operation) {
     case Operation::Replace:
-        out += variable_name + "[0]";
+        out += fmt::format("{}[0]", variable_name);
         break;
     case Operation::Modulate:
-        out += variable_name + "[0] * " + variable_name + "[1]";
+        out += fmt::format("{0}[0] * {0}[1]", variable_name);
         break;
     case Operation::Add:
-        out += variable_name + "[0] + " + variable_name + "[1]";
+        out += fmt::format("{0}[0] + {0}[1]", variable_name);
         break;
     case Operation::AddSigned:
-        out += variable_name + "[0] + " + variable_name + "[1] - vec3(0.5)";
+        out += fmt::format("{0}[0] + {0}[1] - vec3(0.5)", variable_name);
         break;
     case Operation::Lerp:
-        out += variable_name + "[0] * " + variable_name + "[2] + " + variable_name +
-               "[1] * (vec3(1.0) - " + variable_name + "[2])";
+        out += fmt::format("{0}[0] * {0}[2] + {0}[1] * (vec3(1.0) - {0}[2])", variable_name);
         break;
     case Operation::Subtract:
-        out += variable_name + "[0] - " + variable_name + "[1]";
+        out += fmt::format("{0}[0] - {0}[1]", variable_name);
         break;
     case Operation::MultiplyThenAdd:
-        out += variable_name + "[0] * " + variable_name + "[1] + " + variable_name + "[2]";
+        out += fmt::format("{0}[0] * {0}[1] + {0}[2]", variable_name);
         break;
     case Operation::AddThenMultiply:
-        out += "min(" + variable_name + "[0] + " + variable_name + "[1], vec3(1.0)) * " +
-               variable_name + "[2]";
+        out += fmt::format("min({0}[0] + {0}[1], vec3(1.0)) * {0}[2]", variable_name);
         break;
     case Operation::Dot3_RGB:
     case Operation::Dot3_RGBA:
-        out += "vec3(dot(" + variable_name + "[0] - vec3(0.5), " + variable_name +
-               "[1] - vec3(0.5)) * 4.0)";
+        out +=
+            fmt::format("vec3(dot({0}[0] - vec3(0.5), {0}[1] - vec3(0.5)) * 4.0)", variable_name);
         break;
     default:
         out += "vec3(0.0)";
-        LOG_CRITICAL(Render_OpenGL, "Unknown color combiner operation: {}",
-                     static_cast<u32>(operation));
+        LOG_CRITICAL(Render_OpenGL, "Unknown color combiner operation: {}", operation);
         break;
     }
     out += ", vec3(0.0), vec3(1.0))"; // Clamp result to 0.0, 1.0
@@ -552,40 +548,37 @@ static void AppendColorCombiner(std::string& out, TevStageConfig::Operation oper
 
 /// Writes the combiner function for the alpha component for the specified TEV stage operation
 static void AppendAlphaCombiner(std::string& out, TevStageConfig::Operation operation,
-                                const std::string& variable_name) {
+                                std::string_view variable_name) {
     out += "clamp(";
     using Operation = TevStageConfig::Operation;
     switch (operation) {
     case Operation::Replace:
-        out += variable_name + "[0]";
+        out += fmt::format("{}[0]", variable_name);
         break;
     case Operation::Modulate:
-        out += variable_name + "[0] * " + variable_name + "[1]";
+        out += fmt::format("{0}[0] * {0}[1]", variable_name);
         break;
     case Operation::Add:
-        out += variable_name + "[0] + " + variable_name + "[1]";
+        out += fmt::format("{0}[0] + {0}[1]", variable_name);
         break;
     case Operation::AddSigned:
-        out += variable_name + "[0] + " + variable_name + "[1] - 0.5";
+        out += fmt::format("{0}[0] + {0}[1] - 0.5", variable_name);
         break;
     case Operation::Lerp:
-        out += variable_name + "[0] * " + variable_name + "[2] + " + variable_name +
-               "[1] * (1.0 - " + variable_name + "[2])";
+        out += fmt::format("{0}[0] * {0}[2] + {0}[1] * (1.0 - {0}[2])", variable_name);
         break;
     case Operation::Subtract:
-        out += variable_name + "[0] - " + variable_name + "[1]";
+        out += fmt::format("{0}[0] - {0}[1]", variable_name);
         break;
     case Operation::MultiplyThenAdd:
-        out += variable_name + "[0] * " + variable_name + "[1] + " + variable_name + "[2]";
+        out += fmt::format("{0}[0] * {0}[1] + {0}[2]", variable_name);
         break;
     case Operation::AddThenMultiply:
-        out += "min(" + variable_name + "[0] + " + variable_name + "[1], 1.0) * " + variable_name +
-               "[2]";
+        out += fmt::format("min({0}[0] + {0}[1], 1.0) * {0}[2]", variable_name);
         break;
     default:
         out += "0.0";
-        LOG_CRITICAL(Render_OpenGL, "Unknown alpha combiner operation: {}",
-                     static_cast<u32>(operation));
+        LOG_CRITICAL(Render_OpenGL, "Unknown alpha combiner operation: {}", operation);
         break;
     }
     out += ", 0.0, 1.0)";
@@ -607,15 +600,15 @@ static void AppendAlphaTestCondition(std::string& out, FramebufferRegs::CompareF
     case CompareFunc::LessThanOrEqual:
     case CompareFunc::GreaterThan:
     case CompareFunc::GreaterThanOrEqual: {
-        static const char* op[] = {"!=", "==", ">=", ">", "<=", "<"};
-        unsigned index = (unsigned)func - (unsigned)CompareFunc::Equal;
-        out += "int(last_tex_env_out.a * 255.0) " + std::string(op[index]) + " alphatest_ref";
+        static constexpr std::array op{"!=", "==", ">=", ">", "<=", "<"};
+        const auto index = static_cast<u32>(func) - static_cast<u32>(CompareFunc::Equal);
+        out += fmt::format("int(last_tex_env_out.a * 255.0) {} alphatest_ref", op[index]);
         break;
     }
 
     default:
         out += "false";
-        LOG_CRITICAL(Render_OpenGL, "Unknown alpha test condition {}", static_cast<u32>(func));
+        LOG_CRITICAL(Render_OpenGL, "Unknown alpha test condition {}", func);
         break;
     }
 }
@@ -625,26 +618,28 @@ static void WriteTevStage(std::string& out, const PicaFSConfig& config, unsigned
     const auto stage =
         static_cast<const TexturingRegs::TevStageConfig>(config.state.tev_stages[index]);
     if (!IsPassThroughTevStage(stage)) {
-        std::string index_name = std::to_string(index);
+        const std::string index_name = std::to_string(index);
 
-        out += "vec3 color_results_" + index_name + "[3] = vec3[3](";
+        out += fmt::format("vec3 color_results_{}_1 = ", index_name);
         AppendColorModifier(out, config, stage.color_modifier1, stage.color_source1, index_name);
-        out += ", ";
+        out += fmt::format(";\nvec3 color_results_{}_2 = ", index_name);
         AppendColorModifier(out, config, stage.color_modifier2, stage.color_source2, index_name);
-        out += ", ";
+        out += fmt::format(";\nvec3 color_results_{}_3 = ", index_name);
         AppendColorModifier(out, config, stage.color_modifier3, stage.color_source3, index_name);
-        out += ");\n";
+        out += fmt::format(";\nvec3 color_results_{}[3] = vec3[3](color_results_{}_1, "
+                           "color_results_{}_2, color_results_{}_3);\n",
+                           index_name, index_name, index_name, index_name);
 
         // Round the output of each TEV stage to maintain the PICA's 8 bits of precision
-        out += "vec3 color_output_" + index_name + " = byteround(";
+        out += fmt::format("vec3 color_output_{} = byteround(", index_name);
         AppendColorCombiner(out, stage.color_op, "color_results_" + index_name);
         out += ");\n";
 
         if (stage.color_op == TevStageConfig::Operation::Dot3_RGBA) {
             // result of Dot3_RGBA operation is also placed to the alpha component
-            out += "float alpha_output_" + index_name + " = color_output_" + index_name + "[0];\n";
+            out += fmt::format("float alpha_output_{0} = color_output_{0}[0];\n", index_name);
         } else {
-            out += "float alpha_results_" + index_name + "[3] = float[3](";
+            out += fmt::format("float alpha_results_{}[3] = float[3](", index_name);
             AppendAlphaModifier(out, config, stage.alpha_modifier1, stage.alpha_source1,
                                 index_name);
             out += ", ";
@@ -655,18 +650,16 @@ static void WriteTevStage(std::string& out, const PicaFSConfig& config, unsigned
                                 index_name);
             out += ");\n";
 
-            out += "float alpha_output_" + index_name + " = byteround(";
+            out += fmt::format("float alpha_output_{} = byteround(", index_name);
             AppendAlphaCombiner(out, stage.alpha_op, "alpha_results_" + index_name);
             out += ");\n";
         }
 
-        out += "last_tex_env_out = vec4("
-               "clamp(color_output_" +
-               index_name + " * " + std::to_string(stage.GetColorMultiplier()) +
-               ".0, vec3(0.0), vec3(1.0)),"
-               "clamp(alpha_output_" +
-               index_name + " * " + std::to_string(stage.GetAlphaMultiplier()) +
-               ".0, 0.0, 1.0));\n";
+        out += fmt::format("last_tex_env_out = vec4("
+                           "clamp(color_output_{} * {}.0, vec3(0.0), vec3(1.0)), "
+                           "clamp(alpha_output_{} * {}.0, 0.0, 1.0));\n",
+                           index_name, stage.GetColorMultiplier(), index_name,
+                           stage.GetAlphaMultiplier());
     }
 
     out += "combiner_buffer = next_combiner_buffer;\n";
@@ -694,26 +687,26 @@ static void WriteLighting(std::string& out, const PicaFSConfig& config) {
            "float geo_factor = 1.0;\n";
 
     // Compute fragment normals and tangents
-    auto Perturbation = [&]() {
-        return "2.0 * (" + SampleTexture(config, lighting.bump_selector) + ").rgb - 1.0";
+    const auto Perturbation = [&] {
+        return fmt::format("2.0 * ({}).rgb - 1.0", SampleTexture(config, lighting.bump_selector));
     };
     if (lighting.bump_mode == LightingRegs::LightingBumpMode::NormalMap) {
         // Bump mapping is enabled using a normal map
-        out += "vec3 surface_normal = " + Perturbation() + ";\n";
+        out += fmt::format("vec3 surface_normal = {};\n", Perturbation());
 
         // Recompute Z-component of perturbation if 'renorm' is enabled, this provides a higher
         // precision result
         if (lighting.bump_renorm) {
-            std::string val =
+            constexpr std::string_view val =
                 "(1.0 - (surface_normal.x*surface_normal.x + surface_normal.y*surface_normal.y))";
-            out += "surface_normal.z = sqrt(max(" + val + ", 0.0));\n";
+            out += fmt::format("surface_normal.z = sqrt(max({}, 0.0));\n", val);
         }
 
         // The tangent vector is not perturbed by the normal map and is just a unit vector.
         out += "vec3 surface_tangent = vec3(1.0, 0.0, 0.0);\n";
     } else if (lighting.bump_mode == LightingRegs::LightingBumpMode::TangentMap) {
         // Bump mapping is enabled using a tangent map
-        out += "vec3 surface_tangent = " + Perturbation() + ";\n";
+        out += fmt::format("vec3 surface_tangent = {};\n", Perturbation());
         // Mathematically, recomputing Z-component of the tangent vector won't affect the relevant
         // computation below, which is also confirmed on 3DS. So we don't bother recomputing here
         // even if 'renorm' is enabled.
@@ -722,22 +715,22 @@ static void WriteLighting(std::string& out, const PicaFSConfig& config) {
         out += "vec3 surface_normal = vec3(0.0, 0.0, 1.0);\n";
     } else {
         // No bump mapping - surface local normal and tangent are just unit vectors
-        out += "vec3 surface_normal = vec3(0.0, 0.0, 1.0);\n";
-        out += "vec3 surface_tangent = vec3(1.0, 0.0, 0.0);\n";
+        out += "vec3 surface_normal = vec3(0.0, 0.0, 1.0);\n"
+               "vec3 surface_tangent = vec3(1.0, 0.0, 0.0);\n";
     }
 
     // Rotate the surface-local normal by the interpolated normal quaternion to convert it to
     // eyespace.
-    out += "vec4 normalized_normquat = normalize(normquat);\n";
-    out += "vec3 normal = quaternion_rotate(normalized_normquat, surface_normal);\n";
-    out += "vec3 tangent = quaternion_rotate(normalized_normquat, surface_tangent);\n";
+    out += "vec4 normalized_normquat = normalize(normquat);\n"
+           "vec3 normal = quaternion_rotate(normalized_normquat, surface_normal);\n"
+           "vec3 tangent = quaternion_rotate(normalized_normquat, surface_tangent);\n";
 
     if (lighting.enable_shadow) {
         std::string shadow_texture = SampleTexture(config, lighting.shadow_selector);
         if (lighting.shadow_invert) {
-            out += "vec4 shadow = vec4(1.0) - " + shadow_texture + ";\n";
+            out += fmt::format("vec4 shadow = vec4(1.0) - {};\n", shadow_texture);
         } else {
-            out += "vec4 shadow = " + shadow_texture + ";\n";
+            out += fmt::format("vec4 shadow = {};\n", shadow_texture);
         }
     } else {
         out += "vec4 shadow = vec4(1.0);\n";
@@ -753,19 +746,19 @@ static void WriteLighting(std::string& out, const PicaFSConfig& config) {
             break;
 
         case LightingRegs::LightingLutInput::VH:
-            index = std::string("dot(normalize(view), normalize(half_vector))");
+            index = "dot(normalize(view), normalize(half_vector))";
             break;
 
         case LightingRegs::LightingLutInput::NV:
-            index = std::string("dot(normal, normalize(view))");
+            index = "dot(normal, normalize(view))";
             break;
 
         case LightingRegs::LightingLutInput::LN:
-            index = std::string("dot(light_vector, normal)");
+            index = "dot(light_vector, normal)";
             break;
 
         case LightingRegs::LightingLutInput::SP:
-            index = std::string("dot(light_vector, spot_dir)");
+            index = "dot(light_vector, spot_dir)";
             break;
 
         case LightingRegs::LightingLutInput::CP:
@@ -774,11 +767,11 @@ static void WriteLighting(std::string& out, const PicaFSConfig& config) {
                 // Note: even if the normal vector is modified by normal map, which is not the
                 // normal of the tangent plane anymore, the half angle vector is still projected
                 // using the modified normal vector.
-                std::string half_angle_proj =
+                constexpr std::string_view half_angle_proj =
                     "normalize(half_vector) - normal * dot(normal, normalize(half_vector))";
                 // Note: the half angle vector projection is confirmed not normalized before the dot
                 // product. The result is in fact not cos(phi) as the name suggested.
-                index = "dot(" + half_angle_proj + ", tangent)";
+                index = fmt::format("dot({}, tangent)", half_angle_proj);
             } else {
                 index = "0.0";
             }
@@ -791,31 +784,33 @@ static void WriteLighting(std::string& out, const PicaFSConfig& config) {
             break;
         }
 
-        std::string sampler_string = std::to_string(static_cast<unsigned>(sampler));
+        const auto sampler_index = static_cast<u32>(sampler);
 
         if (abs) {
             // LUT index is in the range of (0.0, 1.0)
-            index = lighting.light[light_num].two_sided_diffuse ? "abs(" + index + ")"
-                                                                : "max(" + index + ", 0.0)";
-            return "LookupLightingLUTUnsigned(" + sampler_string + ", " + index + ")";
+            index = lighting.light[light_num].two_sided_diffuse
+                        ? fmt::format("abs({})", index)
+                        : fmt::format("max({}, 0.0)", index);
+            return fmt::format("LookupLightingLUTUnsigned({}, {})", sampler_index, index);
         } else {
             // LUT index is in the range of (-1.0, 1.0)
-            return "LookupLightingLUTSigned(" + sampler_string + ", " + index + ")";
+            return fmt::format("LookupLightingLUTSigned({}, {})", sampler_index, index);
         }
     };
 
     // Write the code to emulate each enabled light
     for (unsigned light_index = 0; light_index < lighting.src_num; ++light_index) {
         const auto& light_config = lighting.light[light_index];
-        std::string light_src = "light_src[" + std::to_string(light_config.num) + "]";
+        const std::string light_src = fmt::format("light_src[{}]", light_config.num);
 
         // Compute light vector (directional or positional)
-        if (light_config.directional)
-            out += "light_vector = normalize(" + light_src + ".position);\n";
-        else
-            out += "light_vector = normalize(" + light_src + ".position + view);\n";
+        if (light_config.directional) {
+            out += fmt::format("light_vector = normalize({}.position);\n", light_src);
+        } else {
+            out += fmt::format("light_vector = normalize({}.position + view);\n", light_src);
+        }
 
-        out += "spot_dir = " + light_src + ".spot_direction;\n";
+        out += fmt::format("spot_dir = {}.spot_direction;\n", light_src);
         out += "half_vector = normalize(view) + light_vector;\n";
 
         // Compute dot product of light_vector and normal, adjust if lighting is one-sided or
@@ -834,21 +829,20 @@ static void WriteLighting(std::string& out, const PicaFSConfig& config) {
         if (light_config.spot_atten_enable &&
             LightingRegs::IsLightingSamplerSupported(
                 lighting.config, LightingRegs::LightingSampler::SpotlightAttenuation)) {
-            std::string value =
+            const std::string value =
                 GetLutValue(LightingRegs::SpotlightAttenuationSampler(light_config.num),
                             light_config.num, lighting.lut_sp.type, lighting.lut_sp.abs_input);
-            spot_atten = "(" + std::to_string(lighting.lut_sp.scale) + " * " + value + ")";
+            spot_atten = fmt::format("({:#} * {})", lighting.lut_sp.scale, value);
         }
 
         // If enabled, compute distance attenuation value
         std::string dist_atten = "1.0";
         if (light_config.dist_atten_enable) {
-            std::string index = "clamp(" + light_src + ".dist_atten_scale * length(-view - " +
-                                light_src + ".position) + " + light_src +
-                                ".dist_atten_bias, 0.0, 1.0)";
-            auto sampler = LightingRegs::DistanceAttenuationSampler(light_config.num);
-            dist_atten = "LookupLightingLUTUnsigned(" +
-                         std::to_string(static_cast<unsigned>(sampler)) + "," + index + ")";
+            const std::string index = fmt::format("clamp({}.dist_atten_scale * length(-view - "
+                                                  "{}.position) + {}.dist_atten_bias, 0.0, 1.0)",
+                                                  light_src, light_src, light_src);
+            const auto sampler = LightingRegs::DistanceAttenuationSampler(light_config.num);
+            dist_atten = fmt::format("LookupLightingLUTUnsigned({}, {})", sampler, index);
         }
 
         if (light_config.geometric_factor_0 || light_config.geometric_factor_1) {
@@ -863,14 +857,14 @@ static void WriteLighting(std::string& out, const PicaFSConfig& config) {
             LightingRegs::IsLightingSamplerSupported(
                 lighting.config, LightingRegs::LightingSampler::Distribution0)) {
             // Lookup specular "distribution 0" LUT value
-            std::string value =
+            const std::string value =
                 GetLutValue(LightingRegs::LightingSampler::Distribution0, light_config.num,
                             lighting.lut_d0.type, lighting.lut_d0.abs_input);
-            d0_lut_value = "(" + std::to_string(lighting.lut_d0.scale) + " * " + value + ")";
+            d0_lut_value = fmt::format("({:#} * {})", lighting.lut_d0.scale, value);
         }
-        std::string specular_0 = "(" + d0_lut_value + " * " + light_src + ".specular_0)";
+        std::string specular_0 = fmt::format("({} * {}.specular_0)", d0_lut_value, light_src);
         if (light_config.geometric_factor_0) {
-            specular_0 = "(" + specular_0 + " * geo_factor)";
+            specular_0 = fmt::format("({} * geo_factor)", specular_0);
         }
 
         // If enabled, lookup ReflectRed value, otherwise, 1.0 is used
@@ -880,8 +874,8 @@ static void WriteLighting(std::string& out, const PicaFSConfig& config) {
             std::string value =
                 GetLutValue(LightingRegs::LightingSampler::ReflectRed, light_config.num,
                             lighting.lut_rr.type, lighting.lut_rr.abs_input);
-            value = "(" + std::to_string(lighting.lut_rr.scale) + " * " + value + ")";
-            out += "refl_value.r = " + value + ";\n";
+            value = fmt::format("({:#} * {})", lighting.lut_rr.scale, value);
+            out += fmt::format("refl_value.r = {};\n", value);
         } else {
             out += "refl_value.r = 1.0;\n";
         }
@@ -893,8 +887,8 @@ static void WriteLighting(std::string& out, const PicaFSConfig& config) {
             std::string value =
                 GetLutValue(LightingRegs::LightingSampler::ReflectGreen, light_config.num,
                             lighting.lut_rg.type, lighting.lut_rg.abs_input);
-            value = "(" + std::to_string(lighting.lut_rg.scale) + " * " + value + ")";
-            out += "refl_value.g = " + value + ";\n";
+            value = fmt::format("({:#} * {})", lighting.lut_rg.scale, value);
+            out += fmt::format("refl_value.g = {};\n", value);
         } else {
             out += "refl_value.g = refl_value.r;\n";
         }
@@ -906,8 +900,8 @@ static void WriteLighting(std::string& out, const PicaFSConfig& config) {
             std::string value =
                 GetLutValue(LightingRegs::LightingSampler::ReflectBlue, light_config.num,
                             lighting.lut_rb.type, lighting.lut_rb.abs_input);
-            value = "(" + std::to_string(lighting.lut_rb.scale) + " * " + value + ")";
-            out += "refl_value.b = " + value + ";\n";
+            value = fmt::format("({:#} * {})", lighting.lut_rb.scale, value);
+            out += fmt::format("refl_value.b = {};\n", value);
         } else {
             out += "refl_value.b = refl_value.r;\n";
         }
@@ -918,15 +912,15 @@ static void WriteLighting(std::string& out, const PicaFSConfig& config) {
             LightingRegs::IsLightingSamplerSupported(
                 lighting.config, LightingRegs::LightingSampler::Distribution1)) {
             // Lookup specular "distribution 1" LUT value
-            std::string value =
+            const std::string value =
                 GetLutValue(LightingRegs::LightingSampler::Distribution1, light_config.num,
                             lighting.lut_d1.type, lighting.lut_d1.abs_input);
-            d1_lut_value = "(" + std::to_string(lighting.lut_d1.scale) + " * " + value + ")";
+            d1_lut_value = fmt::format("({:#} * {})", lighting.lut_d1.scale, value);
         }
         std::string specular_1 =
-            "(" + d1_lut_value + " * refl_value * " + light_src + ".specular_1)";
+            fmt::format("({} * refl_value * {}.specular_1)", d1_lut_value, light_src);
         if (light_config.geometric_factor_1) {
-            specular_1 = "(" + specular_1 + " * geo_factor)";
+            specular_1 = fmt::format("({} * geo_factor)", specular_1);
         }
 
         // Fresnel
@@ -938,16 +932,16 @@ static void WriteLighting(std::string& out, const PicaFSConfig& config) {
             std::string value =
                 GetLutValue(LightingRegs::LightingSampler::Fresnel, light_config.num,
                             lighting.lut_fr.type, lighting.lut_fr.abs_input);
-            value = "(" + std::to_string(lighting.lut_fr.scale) + " * " + value + ")";
+            value = fmt::format("({:#} * {})", lighting.lut_fr.scale, value);
 
             // Enabled for diffuse lighting alpha component
             if (lighting.enable_primary_alpha) {
-                out += "diffuse_sum.a = " + value + ";\n";
+                out += fmt::format("diffuse_sum.a = {};\n", value);
             }
 
             // Enabled for the specular lighting alpha component
             if (lighting.enable_secondary_alpha) {
-                out += "specular_sum.a = " + value + ";\n";
+                out += fmt::format("specular_sum.a = {};\n", value);
             }
         }
 
@@ -957,13 +951,13 @@ static void WriteLighting(std::string& out, const PicaFSConfig& config) {
         std::string shadow_secondary = shadow_secondary_enable ? " * shadow.rgb" : "";
 
         // Compute primary fragment color (diffuse lighting) function
-        out += "diffuse_sum.rgb += ((" + light_src + ".diffuse * dot_product) + " + light_src +
-               ".ambient) * " + dist_atten + " * " + spot_atten + shadow_primary + ";\n";
+        out += fmt::format(
+            "diffuse_sum.rgb += (({}.diffuse * dot_product) + {}.ambient) * {} * {}{};\n",
+            light_src, light_src, dist_atten, spot_atten, shadow_primary);
 
         // Compute secondary fragment color (specular lighting) function
-        out += "specular_sum.rgb += (" + specular_0 + " + " + specular_1 +
-               ") * clamp_highlights * " + dist_atten + " * " + spot_atten + shadow_secondary +
-               ";\n";
+        out += fmt::format("specular_sum.rgb += ({} + {}) * clamp_highlights * {} * {}{};\n",
+                           specular_0, specular_1, dist_atten, spot_atten, shadow_secondary);
     }
 
     // Apply shadow attenuation to alpha components if enabled
@@ -977,9 +971,9 @@ static void WriteLighting(std::string& out, const PicaFSConfig& config) {
     }
 
     // Sum final lighting result
-    out += "diffuse_sum.rgb += lighting_global_ambient;\n";
-    out += "primary_fragment_color = clamp(diffuse_sum, vec4(0.0), vec4(1.0));\n";
-    out += "secondary_fragment_color = clamp(specular_sum, vec4(0.0), vec4(1.0));\n";
+    out += "diffuse_sum.rgb += lighting_global_ambient;\n"
+           "primary_fragment_color = clamp(diffuse_sum, vec4(0.0), vec4(1.0));\n"
+           "secondary_fragment_color = clamp(specular_sum, vec4(0.0), vec4(1.0));\n";
 }
 
 using ProcTexClamp = TexturingRegs::ProcTexClamp;
@@ -987,102 +981,92 @@ using ProcTexShift = TexturingRegs::ProcTexShift;
 using ProcTexCombiner = TexturingRegs::ProcTexCombiner;
 using ProcTexFilter = TexturingRegs::ProcTexFilter;
 
-void AppendProcTexShiftOffset(std::string& out, const std::string& v, ProcTexShift mode,
-                              ProcTexClamp clamp_mode) {
-    std::string offset = (clamp_mode == ProcTexClamp::MirroredRepeat) ? "1.0" : "0.5";
+static void AppendProcTexShiftOffset(std::string& out, std::string_view v, ProcTexShift mode,
+                                     ProcTexClamp clamp_mode) {
+    const std::string_view offset = (clamp_mode == ProcTexClamp::MirroredRepeat) ? "1.0" : "0.5";
     switch (mode) {
     case ProcTexShift::None:
-        out += "0";
+        out += "0.0";
         break;
     case ProcTexShift::Odd:
-        out += offset + " * ((int(" + v + ") / 2) % 2)";
+        out += fmt::format("{} * float((int({}) / 2) % 2)", offset, v);
         break;
     case ProcTexShift::Even:
-        out += offset + " * (((int(" + v + ") + 1) / 2) % 2)";
+        out += fmt::format("{} * float(((int({}) + 1) / 2) % 2)", offset, v);
         break;
     default:
-        LOG_CRITICAL(HW_GPU, "Unknown shift mode {}", static_cast<u32>(mode));
-        out += "0";
+        LOG_CRITICAL(HW_GPU, "Unknown shift mode {}", mode);
+        out += "0.0";
         break;
     }
 }
 
-void AppendProcTexClamp(std::string& out, const std::string& var, ProcTexClamp mode) {
+static void AppendProcTexClamp(std::string& out, std::string_view var, ProcTexClamp mode) {
     switch (mode) {
     case ProcTexClamp::ToZero:
-        out += var + " = " + var + " > 1.0 ? 0 : " + var + ";\n";
+        out += fmt::format("{0} = {0} > 1.0 ? 0 : {0};\n", var);
         break;
     case ProcTexClamp::ToEdge:
-        out += var + " = " + "min(" + var + ", 1.0);\n";
+        out += fmt::format("{0} = min({0}, 1.0);\n", var);
         break;
     case ProcTexClamp::SymmetricalRepeat:
-        out += var + " = " + "fract(" + var + ");\n";
+        out += fmt::format("{0} = fract({0});\n", var);
         break;
     case ProcTexClamp::MirroredRepeat: {
-        out +=
-            var + " = int(" + var + ") % 2 == 0 ? fract(" + var + ") : 1.0 - fract(" + var + ");\n";
+        out += fmt::format("{0} = int({0}) % 2 == 0 ? fract({0}) : 1.0 - fract({0});\n", var);
         break;
     }
     case ProcTexClamp::Pulse:
-        out += var + " = " + var + " > 0.5 ? 1.0 : 0.0;\n";
+        out += fmt::format("{0} = {0} > 0.5 ? 1.0 : 0.0;\n", var);
         break;
     default:
-        LOG_CRITICAL(HW_GPU, "Unknown clamp mode {}", static_cast<u32>(mode));
-        out += var + " = " + "min(" + var + ", 1.0);\n";
+        LOG_CRITICAL(HW_GPU, "Unknown clamp mode {}", mode);
+        out += fmt::format("{0} = min({0}, 1.0);\n", var);
         break;
     }
 }
 
-void AppendProcTexCombineAndMap(std::string& out, ProcTexCombiner combiner,
-                                const std::string& offset) {
-    std::string combined;
-    switch (combiner) {
-    case ProcTexCombiner::U:
-        combined = "u";
-        break;
-    case ProcTexCombiner::U2:
-        combined = "(u * u)";
-        break;
-    case TexturingRegs::ProcTexCombiner::V:
-        combined = "v";
-        break;
-    case TexturingRegs::ProcTexCombiner::V2:
-        combined = "(v * v)";
-        break;
-    case TexturingRegs::ProcTexCombiner::Add:
-        combined = "((u + v) * 0.5)";
-        break;
-    case TexturingRegs::ProcTexCombiner::Add2:
-        combined = "((u * u + v * v) * 0.5)";
-        break;
-    case TexturingRegs::ProcTexCombiner::SqrtAdd2:
-        combined = "min(sqrt(u * u + v * v), 1.0)";
-        break;
-    case TexturingRegs::ProcTexCombiner::Min:
-        combined = "min(u, v)";
-        break;
-    case TexturingRegs::ProcTexCombiner::Max:
-        combined = "max(u, v)";
-        break;
-    case TexturingRegs::ProcTexCombiner::RMax:
-        combined = "min(((u + v) * 0.5 + sqrt(u * u + v * v)) * 0.5, 1.0)";
-        break;
-    default:
-        LOG_CRITICAL(HW_GPU, "Unknown combiner {}", static_cast<u32>(combiner));
-        combined = "0.0";
-        break;
-    }
-    out += "ProcTexLookupLUT(" + offset + ", " + combined + ")";
+static void AppendProcTexCombineAndMap(std::string& out, ProcTexCombiner combiner,
+                                       std::string_view offset) {
+    const auto combined = [combiner]() -> std::string_view {
+        switch (combiner) {
+        case ProcTexCombiner::U:
+            return "u";
+        case ProcTexCombiner::U2:
+            return "(u * u)";
+        case TexturingRegs::ProcTexCombiner::V:
+            return "v";
+        case TexturingRegs::ProcTexCombiner::V2:
+            return "(v * v)";
+        case TexturingRegs::ProcTexCombiner::Add:
+            return "((u + v) * 0.5)";
+        case TexturingRegs::ProcTexCombiner::Add2:
+            return "((u * u + v * v) * 0.5)";
+        case TexturingRegs::ProcTexCombiner::SqrtAdd2:
+            return "min(sqrt(u * u + v * v), 1.0)";
+        case TexturingRegs::ProcTexCombiner::Min:
+            return "min(u, v)";
+        case TexturingRegs::ProcTexCombiner::Max:
+            return "max(u, v)";
+        case TexturingRegs::ProcTexCombiner::RMax:
+            return "min(((u + v) * 0.5 + sqrt(u * u + v * v)) * 0.5, 1.0)";
+        default:
+            LOG_CRITICAL(HW_GPU, "Unknown combiner {}", combiner);
+            return "0.0";
+        }
+    }();
+
+    out += fmt::format("ProcTexLookupLUT({}, {})", offset, combined);
 }
 
-void AppendProcTexSampler(std::string& out, const PicaFSConfig& config) {
+static void AppendProcTexSampler(std::string& out, const PicaFSConfig& config) {
     // LUT sampling uitlity
     // For NoiseLUT/ColorMap/AlphaMap, coord=0.0 is lut[0], coord=127.0/128.0 is lut[127] and
     // coord=1.0 is lut[127]+lut_diff[127]. For other indices, the result is interpolated using
     // value entries and difference entries.
     out += R"(
 float ProcTexLookupLUT(int offset, float coord) {
-    coord *= 128;
+    coord *= 128.0;
     float index_i = clamp(floor(coord), 0.0, 127.0);
     float index_f = coord - index_i; // fract() cannot be used here because 128.0 needs to be
                                      // extracted as index_i = 127.0 and index_f = 1.0
@@ -1132,17 +1116,14 @@ float ProcTexNoiseCoef(vec2 x) {
     }
 
     out += "vec4 SampleProcTexColor(float lut_coord, int level) {\n";
-    out += "int lut_width = " + std::to_string(config.state.proctex.lut_width) + " >> level;\n";
-    std::string offset0 = std::to_string(config.state.proctex.lut_offset0);
-    std::string offset1 = std::to_string(config.state.proctex.lut_offset1);
-    std::string offset2 = std::to_string(config.state.proctex.lut_offset2);
-    std::string offset3 = std::to_string(config.state.proctex.lut_offset3);
+    out += fmt::format("int lut_width = {} >> level;\n", config.state.proctex.lut_width);
     // Offsets for level 4-7 seem to be hardcoded
-    out += "int lut_offsets[8] = int[](" + offset0 + ", " + offset1 + ", " + offset2 + ", " +
-           offset3 + ", 0xF0, 0xF8, 0xFC, 0xFE);\n";
+    out += fmt::format("int lut_offsets[8] = int[]({}, {}, {}, {}, 0xF0, 0xF8, 0xFC, 0xFE);\n",
+                       config.state.proctex.lut_offset0, config.state.proctex.lut_offset1,
+                       config.state.proctex.lut_offset2, config.state.proctex.lut_offset3);
     out += "int lut_offset = lut_offsets[level];\n";
     // For the color lut, coord=0.0 is lut[offset] and coord=1.0 is lut[offset+width-1]
-    out += "lut_coord *= lut_width - 1;\n";
+    out += "lut_coord *= float(lut_width - 1);\n";
 
     switch (config.state.proctex.lut_filter) {
     case ProcTexFilter::Linear:
@@ -1158,7 +1139,7 @@ float ProcTexNoiseCoef(vec2 x) {
     case ProcTexFilter::Nearest:
     case ProcTexFilter::NearestMipmapLinear:
     case ProcTexFilter::NearestMipmapNearest:
-        out += "lut_coord += lut_offset;\n";
+        out += "lut_coord += float(lut_offset);\n";
         out += "return texelFetch(texture_buffer_lut_rgba, int(round(lut_coord)) + "
                "proctex_lut_offset);\n";
         break;
@@ -1168,7 +1149,7 @@ float ProcTexNoiseCoef(vec2 x) {
 
     out += "vec4 ProcTex() {\n";
     if (config.state.proctex.coord < 3) {
-        out += "vec2 uv = abs(texcoord" + std::to_string(config.state.proctex.coord) + ");\n";
+        out += fmt::format("vec2 uv = abs(texcoord{});\n", config.state.proctex.coord);
     } else {
         LOG_CRITICAL(Render_OpenGL, "Unexpected proctex.coord >= 3");
         out += "vec2 uv = abs(texcoord0);\n";
@@ -1180,12 +1161,12 @@ float ProcTexNoiseCoef(vec2 x) {
     // Note: this is different from the one normal 2D textures use.
     out += "vec2 duv = max(abs(dFdx(uv)), abs(dFdy(uv)));\n";
     // unlike normal texture, the bias is inside the log2
-    out += "float lod = log2(abs(" + std::to_string(config.state.proctex.lut_width) +
-           " * proctex_bias) * (duv.x + duv.y));\n";
+    out += fmt::format("float lod = log2(abs(float({}) * proctex_bias) * (duv.x + duv.y));\n",
+                       config.state.proctex.lut_width);
     out += "if (proctex_bias == 0.0) lod = 0.0;\n";
-    out += "lod = clamp(lod, " +
-           std::to_string(std::max<float>(0.0f, config.state.proctex.lod_min)) + ", " +
-           std::to_string(std::min<float>(7.0f, config.state.proctex.lod_max)) + ");\n";
+    out += fmt::format("lod = clamp(lod, {:#}, {:#});\n",
+                       std::max(0.0f, static_cast<float>(config.state.proctex.lod_min)),
+                       std::min(7.0f, static_cast<float>(config.state.proctex.lod_max)));
     // Get shift offset before noise generation
     out += "float u_shift = ";
     AppendProcTexShiftOffset(out, "uv.y", config.state.proctex.u_shift,
@@ -1198,13 +1179,13 @@ float ProcTexNoiseCoef(vec2 x) {
 
     // Generate noise
     if (config.state.proctex.noise_enable) {
-        out += "uv += proctex_noise_a * ProcTexNoiseCoef(uv);\n";
-        out += "uv = abs(uv);\n";
+        out += "uv += proctex_noise_a * ProcTexNoiseCoef(uv);\n"
+               "uv = abs(uv);\n";
     }
 
     // Shift
-    out += "float u = uv.x + u_shift;\n";
-    out += "float v = uv.y + v_shift;\n";
+    out += "float u = uv.x + u_shift;\n"
+           "float v = uv.y + v_shift;\n";
 
     // Clamp
     AppendProcTexClamp(out, "u", config.state.proctex.u_clamp);
@@ -1227,9 +1208,9 @@ float ProcTexNoiseCoef(vec2 x) {
         break;
     case ProcTexFilter::NearestMipmapLinear:
     case ProcTexFilter::LinearMipmapLinear:
-        out += "int lod_i = int(lod);\n";
-        out += "float lod_f = fract(lod);\n";
-        out += "vec4 final_color = mix(SampleProcTexColor(lut_coord, lod_i), "
+        out += "int lod_i = int(lod);\n"
+               "float lod_f = fract(lod);\n"
+               "vec4 final_color = mix(SampleProcTexColor(lut_coord, lod_i), "
                "SampleProcTexColor(lut_coord, lod_i + 1), lod_f);\n";
         break;
     }
@@ -1247,16 +1228,24 @@ float ProcTexNoiseCoef(vec2 x) {
     }
 }
 
-std::string GenerateFragmentShader(const PicaFSConfig& config, bool separable_shader) {
+ShaderDecompiler::ProgramResult GenerateFragmentShader(const PicaFSConfig& config,
+                                                       bool separable_shader) {
     const auto& state = config.state;
+    std::string out;
 
-    std::string out = R"(
+    if (GLES) {
+        out += R"(
+#define ALLOW_SHADOW (defined(CITRA_GLES))
+)";
+    } else {
+        out += R"(
 #extension GL_ARB_shader_image_load_store : enable
 #extension GL_ARB_shader_image_size : enable
 #define ALLOW_SHADOW (defined(GL_ARB_shader_image_load_store) && defined(GL_ARB_shader_image_size))
 )";
+    }
 
-    if (separable_shader) {
+    if (separable_shader && !GLES) {
         out += "#extension GL_ARB_separate_shader_objects : enable\n";
     }
 
@@ -1277,6 +1266,7 @@ uniform sampler2D tex0;
 uniform sampler2D tex1;
 uniform sampler2D tex2;
 uniform samplerCube tex_cube;
+uniform samplerBuffer texture_buffer_lut_lf;
 uniform samplerBuffer texture_buffer_lut_rg;
 uniform samplerBuffer texture_buffer_lut_rgba;
 
@@ -1300,7 +1290,7 @@ vec3 quaternion_rotate(vec4 q, vec3 v) {
 }
 
 float LookupLightingLUT(int lut_index, int index, float delta) {
-    vec2 entry = texelFetch(texture_buffer_lut_rg, lighting_lut_offset[lut_index >> 2][lut_index & 3] + index).rg;
+    vec2 entry = texelFetch(texture_buffer_lut_lf, lighting_lut_offset[lut_index >> 2][lut_index & 3] + index).rg;
     return entry.r + entry.g * delta;
 }
 
@@ -1331,6 +1321,15 @@ vec3 byteround(vec3 x) {
 
 vec4 byteround(vec4 x) {
     return round(x * 255.0) * (1.0 / 255.0);
+}
+
+// PICA's LOD formula for 2D textures.
+// This LOD formula is the same as the LOD lower limit defined in OpenGL.
+// f(x, y) >= max{m_u, m_v, m_w}
+// (See OpenGL 4.6 spec, 8.14.1 - Scale Factor and Level-of-Detail)
+float getLod(vec2 coord) {
+    vec2 d = max(abs(dFdx(coord)), abs(dFdy(coord)));
+    return log2(max(d.x, d.y));
 }
 
 #if ALLOW_SHADOW
@@ -1364,7 +1363,7 @@ vec4 shadowTexture(vec2 uv, float w) {
     if (!config.state.shadow_texture_orthographic) {
         out += "uv /= w;";
     }
-    out += "uint z = uint(max(0, int(min(abs(w), 1.0) * 0xFFFFFF) - shadow_texture_bias));";
+    out += "uint z = uint(max(0, int(min(abs(w), 1.0) * float(0xFFFFFF)) - shadow_texture_bias));";
     out += R"(
     vec2 coord = vec2(imageSize(shadow_texture_px)) * uv - vec2(0.5);
     vec2 coord_floor = floor(coord);
@@ -1396,7 +1395,7 @@ vec4 shadowTextureCube(vec2 uv, float w) {
         if (c.z > 0.0) uv.x = -uv.x;
     }
 )";
-    out += "uint z = uint(max(0, int(min(w, 1.0) * 0xFFFFFF) - shadow_texture_bias));";
+    out += "uint z = uint(max(0, int(min(w, 1.0) * float(0xFFFFFF)) - shadow_texture_bias));";
     out += R"(
     vec2 coord = vec2(size) * (uv / w * vec2(0.5) + vec2(0.5)) - vec2(0.5);
     vec2 coord_floor = floor(coord);
@@ -1489,15 +1488,16 @@ vec4 secondary_fragment_color = vec4(0.0);
     // Do not do any sort of processing if it's obvious we're not going to pass the alpha test
     if (state.alpha_test_func == FramebufferRegs::CompareFunc::Never) {
         out += "discard; }";
-        return out;
+        return {std::move(out)};
     }
 
     // Append the scissor test
     if (state.scissor_test_mode != RasterizerRegs::ScissorMode::Disabled) {
         out += "if (";
         // Negate the condition if we have to keep only the pixels outside the scissor box
-        if (state.scissor_test_mode == RasterizerRegs::ScissorMode::Include)
-            out += "!";
+        if (state.scissor_test_mode == RasterizerRegs::ScissorMode::Include) {
+            out += '!';
+        }
         out += "(gl_FragCoord.x >= float(scissor_x1) && "
                "gl_FragCoord.y >= float(scissor_y1) && "
                "gl_FragCoord.x < float(scissor_x2) && "
@@ -1507,8 +1507,8 @@ vec4 secondary_fragment_color = vec4(0.0);
     // After perspective divide, OpenGL transform z_over_w from [-1, 1] to [near, far]. Here we use
     // default near = 0 and far = 1, and undo the transformation to get the original z_over_w, then
     // do our own transformation according to PICA specification.
-    out += "float z_over_w = 2.0 * gl_FragCoord.z - 1.0;\n";
-    out += "float depth = z_over_w * depth_scale + depth_offset;\n";
+    out += "float z_over_w = 2.0 * gl_FragCoord.z - 1.0;\n"
+           "float depth = z_over_w * depth_scale + depth_offset;\n";
     if (state.depthmap_enable == RasterizerRegs::DepthBuffering::WBuffering) {
         out += "depth /= gl_FragCoord.w;\n";
     }
@@ -1516,12 +1516,13 @@ vec4 secondary_fragment_color = vec4(0.0);
     if (state.lighting.enable)
         WriteLighting(out, config);
 
-    out += "vec4 combiner_buffer = vec4(0.0);\n";
-    out += "vec4 next_combiner_buffer = tev_combiner_buffer_color;\n";
-    out += "vec4 last_tex_env_out = vec4(0.0);\n";
+    out += "vec4 combiner_buffer = vec4(0.0);\n"
+           "vec4 next_combiner_buffer = tev_combiner_buffer_color;\n"
+           "vec4 last_tex_env_out = vec4(0.0);\n";
 
-    for (std::size_t index = 0; index < state.tev_stages.size(); ++index)
-        WriteTevStage(out, config, (unsigned)index);
+    for (std::size_t index = 0; index < state.tev_stages.size(); ++index) {
+        WriteTevStage(out, config, static_cast<u32>(index));
+    }
 
     if (state.alpha_test_func != FramebufferRegs::CompareFunc::Always) {
         out += "if (";
@@ -1539,28 +1540,28 @@ vec4 secondary_fragment_color = vec4(0.0);
         }
 
         // Generate clamped fog factor from LUT for given fog index
-        out += "float fog_i = clamp(floor(fog_index), 0.0, 127.0);\n";
-        out += "float fog_f = fog_index - fog_i;\n";
-        out += "vec2 fog_lut_entry = texelFetch(texture_buffer_lut_rg, int(fog_i) + "
-               "fog_lut_offset).rg;\n";
-        out += "float fog_factor = fog_lut_entry.r + fog_lut_entry.g * fog_f;\n";
-        out += "fog_factor = clamp(fog_factor, 0.0, 1.0);\n";
+        out += "float fog_i = clamp(floor(fog_index), 0.0, 127.0);\n"
+               "float fog_f = fog_index - fog_i;\n"
+               "vec2 fog_lut_entry = texelFetch(texture_buffer_lut_lf, int(fog_i) + "
+               "fog_lut_offset).rg;\n"
+               "float fog_factor = fog_lut_entry.r + fog_lut_entry.g * fog_f;\n"
+               "fog_factor = clamp(fog_factor, 0.0, 1.0);\n";
 
         // Blend the fog
         out += "last_tex_env_out.rgb = mix(fog_color.rgb, last_tex_env_out.rgb, fog_factor);\n";
     } else if (state.fog_mode == TexturingRegs::FogMode::Gas) {
-        Core::Telemetry().AddField(Telemetry::FieldType::Session, "VideoCore_Pica_UseGasMode",
-                                   true);
+        Core::System::GetInstance().TelemetrySession().AddField(
+            Common::Telemetry::FieldType::Session, "VideoCore_Pica_UseGasMode", true);
         LOG_CRITICAL(Render_OpenGL, "Unimplemented gas mode");
         out += "discard; }";
-        return out;
+        return {std::move(out)};
     }
 
     if (state.shadow_rendering) {
         out += R"(
 #if ALLOW_SHADOW
-uint d = uint(clamp(depth, 0.0, 1.0) * 0xFFFFFF);
-uint s = uint(last_tex_env_out.g * 0xFF);
+uint d = uint(clamp(depth, 0.0, 1.0) * float(0xFFFFFF));
+uint s = uint(last_tex_env_out.g * float(0xFF));
 ivec2 image_coord = ivec2(gl_FragCoord.xy);
 
 uint old = imageLoad(shadow_buffer, image_coord).x;
@@ -1589,31 +1590,54 @@ do {
         out += "color = byteround(last_tex_env_out);\n";
     }
 
-    out += "}";
+    if (GLES) {
+        if (!state.alphablend_enable) {
+            switch (state.logic_op) {
+            case FramebufferRegs::LogicOp::Clear:
+                out += "color = vec4(0);\n";
+                break;
+            case FramebufferRegs::LogicOp::Set:
+                out += "color = vec4(1);\n";
+                break;
+            case FramebufferRegs::LogicOp::Copy:
+                // Take the color output as-is
+                break;
+            case FramebufferRegs::LogicOp::CopyInverted:
+                out += "color = ~color;\n";
+                break;
+            case FramebufferRegs::LogicOp::NoOp:
+                // We need to discard the color, but not necessarily the depth. This is not possible
+                // with fragment shader alone, so we emulate this behavior on GLES with glColorMask.
+                break;
+            default:
+                LOG_CRITICAL(HW_GPU, "Unhandled logic_op {:x}", static_cast<int>(state.logic_op));
+                UNIMPLEMENTED();
+            }
+        }
+    }
 
-    return out;
+    out += '}';
+
+    return {std::move(out)};
 }
 
-std::string GenerateTrivialVertexShader(bool separable_shader) {
-    std::string out = "";
-    if (separable_shader) {
+ShaderDecompiler::ProgramResult GenerateTrivialVertexShader(bool separable_shader) {
+    std::string out;
+    if (separable_shader && !GLES) {
         out += "#extension GL_ARB_separate_shader_objects : enable\n";
     }
 
-    out += "layout(location = " + std::to_string((int)ATTRIBUTE_POSITION) +
-           ") in vec4 vert_position;\n";
-    out += "layout(location = " + std::to_string((int)ATTRIBUTE_COLOR) + ") in vec4 vert_color;\n";
-    out += "layout(location = " + std::to_string((int)ATTRIBUTE_TEXCOORD0) +
-           ") in vec2 vert_texcoord0;\n";
-    out += "layout(location = " + std::to_string((int)ATTRIBUTE_TEXCOORD1) +
-           ") in vec2 vert_texcoord1;\n";
-    out += "layout(location = " + std::to_string((int)ATTRIBUTE_TEXCOORD2) +
-           ") in vec2 vert_texcoord2;\n";
-    out += "layout(location = " + std::to_string((int)ATTRIBUTE_TEXCOORD0_W) +
-           ") in float vert_texcoord0_w;\n";
-    out += "layout(location = " + std::to_string((int)ATTRIBUTE_NORMQUAT) +
-           ") in vec4 vert_normquat;\n";
-    out += "layout(location = " + std::to_string((int)ATTRIBUTE_VIEW) + ") in vec3 vert_view;\n";
+    out +=
+        fmt::format("layout(location = {}) in vec4 vert_position;\n"
+                    "layout(location = {}) in vec4 vert_color;\n"
+                    "layout(location = {}) in vec2 vert_texcoord0;\n"
+                    "layout(location = {}) in vec2 vert_texcoord1;\n"
+                    "layout(location = {}) in vec2 vert_texcoord2;\n"
+                    "layout(location = {}) in float vert_texcoord0_w;\n"
+                    "layout(location = {}) in vec4 vert_normquat;\n"
+                    "layout(location = {}) in vec3 vert_view;\n",
+                    ATTRIBUTE_POSITION, ATTRIBUTE_COLOR, ATTRIBUTE_TEXCOORD0, ATTRIBUTE_TEXCOORD1,
+                    ATTRIBUTE_TEXCOORD2, ATTRIBUTE_TEXCOORD0_W, ATTRIBUTE_NORMQUAT, ATTRIBUTE_VIEW);
 
     out += GetVertexInterfaceDeclaration(true, separable_shader);
 
@@ -1637,41 +1661,41 @@ void main() {
 }
 )";
 
-    return out;
+    return {std::move(out)};
 }
 
-std::optional<std::string> GenerateVertexShader(const Pica::Shader::ShaderSetup& setup,
-                                                const PicaVSConfig& config, bool separable_shader) {
-    std::string out = "";
-    if (separable_shader) {
+std::optional<ShaderDecompiler::ProgramResult> GenerateVertexShader(
+    const Pica::Shader::ShaderSetup& setup, const PicaVSConfig& config, bool separable_shader) {
+    std::string out;
+    if (separable_shader && !GLES) {
         out += "#extension GL_ARB_separate_shader_objects : enable\n";
     }
 
     out += ShaderDecompiler::GetCommonDeclarations();
 
     std::array<bool, 16> used_regs{};
-    auto get_input_reg = [&](u32 reg) -> std::string {
+    const auto get_input_reg = [&used_regs](u32 reg) {
         ASSERT(reg < 16);
         used_regs[reg] = true;
-        return "vs_in_reg" + std::to_string(reg);
+        return fmt::format("vs_in_reg{}", reg);
     };
 
-    auto get_output_reg = [&](u32 reg) -> std::string {
+    const auto get_output_reg = [&](u32 reg) -> std::string {
         ASSERT(reg < 16);
         if (config.state.output_map[reg] < config.state.num_outputs) {
-            return "vs_out_attr" + std::to_string(config.state.output_map[reg]);
+            return fmt::format("vs_out_attr{}", config.state.output_map[reg]);
         }
         return "";
     };
 
     auto program_source_opt = ShaderDecompiler::DecompileProgram(
         setup.program_code, setup.swizzle_data, config.state.main_offset, get_input_reg,
-        get_output_reg, config.state.sanitize_mul, false);
+        get_output_reg, config.state.sanitize_mul);
 
     if (!program_source_opt)
-        return {};
+        return std::nullopt;
 
-    std::string& program_source = *program_source_opt;
+    std::string& program_source = program_source_opt->code;
 
     out += R"(
 #define uniforms vs_uniforms
@@ -1683,11 +1707,10 @@ layout (std140) uniform vs_config {
     // input attributes declaration
     for (std::size_t i = 0; i < used_regs.size(); ++i) {
         if (used_regs[i]) {
-            out += "layout(location = " + std::to_string(i) + ") in vec4 vs_in_reg" +
-                   std::to_string(i) + ";\n";
+            out += fmt::format("layout(location = {0}) in vec4 vs_in_reg{0};\n", i);
         }
     }
-    out += "\n";
+    out += '\n';
 
     // output attributes declaration
     for (u32 i = 0; i < config.state.num_outputs; ++i) {
@@ -1697,13 +1720,13 @@ layout (std140) uniform vs_config {
 
     out += "\nvoid main() {\n";
     for (u32 i = 0; i < config.state.num_outputs; ++i) {
-        out += "    vs_out_attr" + std::to_string(i) + " = vec4(0.0, 0.0, 0.0, 1.0);\n";
+        out += fmt::format("    vs_out_attr{} = vec4(0.0, 0.0, 0.0, 1.0);\n", i);
     }
     out += "\n    exec_shader();\n}\n\n";
 
     out += program_source;
 
-    return out;
+    return {{std::move(out)}};
 }
 
 static std::string GetGSCommonSource(const PicaGSConfigCommonRaw& config, bool separable_shader) {
@@ -1718,22 +1741,17 @@ static std::string GetGSCommonSource(const PicaGSConfigCommonRaw& config, bool s
     }
 
     out += R"(
-#define uniforms gs_uniforms
-layout (std140) uniform gs_config {
-    pica_uniforms uniforms;
-};
-
 struct Vertex {
 )";
-    out += "    vec4 attributes[" + std::to_string(config.gs_output_attributes) + "];\n";
+    out += fmt::format("    vec4 attributes[{}];\n", config.gs_output_attributes);
     out += "};\n\n";
 
-    auto semantic = [&config](VSOutputAttributes::Semantic slot_semantic) -> std::string {
-        u32 slot = static_cast<u32>(slot_semantic);
-        u32 attrib = config.semantic_maps[slot].attribute_index;
-        u32 comp = config.semantic_maps[slot].component_index;
+    const auto semantic = [&config](VSOutputAttributes::Semantic slot_semantic) -> std::string {
+        const u32 slot = static_cast<u32>(slot_semantic);
+        const u32 attrib = config.semantic_maps[slot].attribute_index;
+        const u32 comp = config.semantic_maps[slot].component_index;
         if (attrib < config.gs_output_attributes) {
-            return "vtx.attributes[" + std::to_string(attrib) + "]." + "xyzw"[comp];
+            return fmt::format("vtx.attributes[{}].{}", attrib, "xyzw"[comp]);
         }
         return "0.0";
     };
@@ -1750,7 +1768,6 @@ struct Vertex {
            semantic(VSOutputAttributes::POSITION_Y) + ", " +
            semantic(VSOutputAttributes::POSITION_Z) + ", " +
            semantic(VSOutputAttributes::POSITION_W) + ");\n";
-    semantic(VSOutputAttributes::POSITION_W) + ");\n";
     out += "    gl_Position = vtx_pos;\n";
     out += "#if !defined(CITRA_GLES) || defined(GL_EXT_clip_cull_distance)\n";
     out += "    gl_ClipDistance[0] = -vtx_pos.z;\n"; // fixed PICA clipping plane z <= 0
@@ -1797,9 +1814,10 @@ void EmitPrim(Vertex vtx0, Vertex vtx1, Vertex vtx2) {
     return out;
 };
 
-std::string GenerateFixedGeometryShader(const PicaFixedGSConfig& config, bool separable_shader) {
-    std::string out = "";
-    if (separable_shader) {
+ShaderDecompiler::ProgramResult GenerateFixedGeometryShader(const PicaFixedGSConfig& config,
+                                                            bool separable_shader) {
+    std::string out;
+    if (separable_shader && !GLES) {
         out += "#extension GL_ARB_separate_shader_objects : enable\n\n";
     }
 
@@ -1816,129 +1834,16 @@ void main() {
     Vertex prim_buffer[3];
 )";
     for (u32 vtx = 0; vtx < 3; ++vtx) {
-        out += "    prim_buffer[" + std::to_string(vtx) + "].attributes = vec4[" +
-               std::to_string(config.state.gs_output_attributes) + "](";
+        out += fmt::format("    prim_buffer[{}].attributes = vec4[{}](", vtx,
+                           config.state.gs_output_attributes);
         for (u32 i = 0; i < config.state.vs_output_attributes; ++i) {
-            out += std::string(i == 0 ? "" : ", ") + "vs_out_attr" + std::to_string(i) + "[" +
-                   std::to_string(vtx) + "]";
+            out += fmt::format("{}vs_out_attr{}[{}]", i == 0 ? "" : ", ", i, vtx);
         }
         out += ");\n";
     }
     out += "    EmitPrim(prim_buffer[0], prim_buffer[1], prim_buffer[2]);\n";
     out += "}\n";
 
-    return out;
+    return {std::move(out)};
 }
-
-std::optional<std::string> GenerateGeometryShader(const Pica::Shader::ShaderSetup& setup,
-                                                  const PicaGSConfig& config,
-                                                  bool separable_shader) {
-    std::string out = "";
-    if (separable_shader) {
-        out += "#extension GL_ARB_separate_shader_objects : enable\n";
-    }
-
-    if (config.state.num_inputs % config.state.attributes_per_vertex != 0)
-        return {};
-
-    switch (config.state.num_inputs / config.state.attributes_per_vertex) {
-    case 1:
-        out += "layout(points) in;\n";
-        break;
-    case 2:
-        out += "layout(lines) in;\n";
-        break;
-    case 4:
-        out += "layout(lines_adjacency) in;\n";
-        break;
-    case 3:
-        out += "layout(triangles) in;\n";
-        break;
-    case 6:
-        out += "layout(triangles_adjacency) in;\n";
-        break;
-    default:
-        return {};
-    }
-    out += "layout(triangle_strip, max_vertices = 30) out;\n\n";
-
-    out += GetGSCommonSource(config.state, separable_shader);
-
-    auto get_input_reg = [&](u32 reg) -> std::string {
-        ASSERT(reg < 16);
-        u32 attr = config.state.input_map[reg];
-        if (attr < config.state.num_inputs) {
-            return "vs_out_attr" + std::to_string(attr % config.state.attributes_per_vertex) + "[" +
-                   std::to_string(attr / config.state.attributes_per_vertex) + "]";
-        }
-        return "vec4(0.0, 0.0, 0.0, 1.0)";
-    };
-
-    auto get_output_reg = [&](u32 reg) -> std::string {
-        ASSERT(reg < 16);
-        if (config.state.output_map[reg] < config.state.num_outputs) {
-            return "output_buffer.attributes[" + std::to_string(config.state.output_map[reg]) + "]";
-        }
-        return "";
-    };
-
-    auto program_source_opt = ShaderDecompiler::DecompileProgram(
-        setup.program_code, setup.swizzle_data, config.state.main_offset, get_input_reg,
-        get_output_reg, config.state.sanitize_mul, true);
-
-    if (!program_source_opt)
-        return {};
-
-    std::string& program_source = *program_source_opt;
-
-    out += R"(
-Vertex output_buffer;
-Vertex prim_buffer[3];
-uint vertex_id = 0u;
-bool prim_emit = false;
-bool winding = false;
-
-void setemit(uint vertex_id_, bool prim_emit_, bool winding_);
-void emit();
-
-void main() {
-)";
-    for (u32 i = 0; i < config.state.num_outputs; ++i) {
-        out +=
-            "    output_buffer.attributes[" + std::to_string(i) + "] = vec4(0.0, 0.0, 0.0, 1.0);\n";
-    }
-
-    // execute shader
-    out += "\n    exec_shader();\n\n";
-
-    out += "}\n\n";
-
-    // Put the definition of setemit and emit after main to avoid spurious warning about
-    // uninitialized output_buffer in some drivers
-    out += R"(
-void setemit(uint vertex_id_, bool prim_emit_, bool winding_) {
-    vertex_id = vertex_id_;
-    prim_emit = prim_emit_;
-    winding = winding_;
-}
-
-void emit() {
-    prim_buffer[vertex_id] = output_buffer;
-
-    if (prim_emit) {
-        if (winding) {
-            EmitPrim(prim_buffer[1], prim_buffer[0], prim_buffer[2]);
-            winding = false;
-        } else {
-            EmitPrim(prim_buffer[0], prim_buffer[1], prim_buffer[2]);
-        }
-    }
-}
-)";
-
-    out += program_source;
-
-    return out;
-}
-
 } // namespace OpenGL

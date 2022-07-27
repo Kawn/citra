@@ -4,10 +4,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numeric>
+#include <boost/serialization/array.hpp>
+#include <boost/serialization/shared_ptr.hpp>
+#include <boost/serialization/unique_ptr.hpp>
+#include "common/archives.h"
 #include "common/logging/log.h"
 #include "core/3ds.h"
 #include "core/core.h"
-#include "core/core_timing.h"
 #include "core/hle/ipc_helpers.h"
 #include "core/hle/kernel/event.h"
 #include "core/hle/kernel/handle_table.h"
@@ -20,12 +24,35 @@
 #include "core/movie.h"
 #include "video_core/video_core.h"
 
+SERVICE_CONSTRUCT_IMPL(Service::HID::Module)
+SERIALIZE_EXPORT_IMPL(Service::HID::Module)
+
 namespace Service::HID {
 
-// Updating period for each HID device. These empirical values are measured from a 11.2 3DS.
-constexpr u64 pad_update_ticks = BASE_CLOCK_RATE_ARM11 / 234;
-constexpr u64 accelerometer_update_ticks = BASE_CLOCK_RATE_ARM11 / 104;
-constexpr u64 gyroscope_update_ticks = BASE_CLOCK_RATE_ARM11 / 101;
+template <class Archive>
+void Module::serialize(Archive& ar, const unsigned int file_version) {
+    ar& shared_mem;
+    ar& event_pad_or_touch_1;
+    ar& event_pad_or_touch_2;
+    ar& event_accelerometer;
+    ar& event_gyroscope;
+    ar& event_debug_pad;
+    ar& next_pad_index;
+    ar& next_touch_index;
+    ar& next_accelerometer_index;
+    ar& next_gyroscope_index;
+    ar& enable_accelerometer_count;
+    ar& enable_gyroscope_count;
+    if (Archive::is_loading::value) {
+        LoadInputDevices();
+    }
+    if (file_version >= 1) {
+        ar& state.hex;
+    }
+    // Update events are set in the constructor
+    // Devices are set from the implementation (and are stateless afaik)
+}
+SERIALIZE_IMPL(Module)
 
 constexpr float accelerometer_coef = 512.0f; // measured from hw test result
 constexpr float gyroscope_coef = 14.375f; // got from hwtest GetGyroscopeLowRawToDpsCoefficient call
@@ -71,6 +98,11 @@ void Module::LoadInputDevices() {
         Settings::values.current_input_profile.motion_device);
     touch_device = Input::CreateDevice<Input::TouchDevice>(
         Settings::values.current_input_profile.touch_device);
+    if (Settings::values.current_input_profile.use_touch_from_button) {
+        touch_btn_device = Input::CreateDevice<Input::TouchDevice>("engine:touch_from_button");
+    } else {
+        touch_btn_device.reset();
+    }
 }
 
 void Module::UpdatePadCallback(u64 userdata, s64 cycles_late) {
@@ -98,9 +130,25 @@ void Module::UpdatePadCallback(u64 userdata, s64 cycles_late) {
     // Get current circle pad position and update circle pad direction
     float circle_pad_x_f, circle_pad_y_f;
     std::tie(circle_pad_x_f, circle_pad_y_f) = circle_pad->GetStatus();
-    constexpr int MAX_CIRCLEPAD_POS = 0x9C; // Max value for a circle pad position
-    s16 circle_pad_x = static_cast<s16>(circle_pad_x_f * MAX_CIRCLEPAD_POS);
-    s16 circle_pad_y = static_cast<s16>(circle_pad_y_f * MAX_CIRCLEPAD_POS);
+
+    // xperia64: 0x9A seems to be the calibrated limit of the circle pad
+    // Verified by using Input Redirector with very large-value digital inputs
+    // on the circle pad and calibrating using the system settings application
+    constexpr int MAX_CIRCLEPAD_POS = 0x9A; // Max value for a circle pad position
+
+    // These are rounded rather than truncated on actual hardware
+    s16 circle_pad_new_x = static_cast<s16>(std::roundf(circle_pad_x_f * MAX_CIRCLEPAD_POS));
+    s16 circle_pad_new_y = static_cast<s16>(std::roundf(circle_pad_y_f * MAX_CIRCLEPAD_POS));
+    s16 circle_pad_x =
+        (circle_pad_new_x + std::accumulate(circle_pad_old_x.begin(), circle_pad_old_x.end(), 0)) /
+        CIRCLE_PAD_AVERAGING;
+    s16 circle_pad_y =
+        (circle_pad_new_y + std::accumulate(circle_pad_old_y.begin(), circle_pad_old_y.end(), 0)) /
+        CIRCLE_PAD_AVERAGING;
+    circle_pad_old_x.erase(circle_pad_old_x.begin());
+    circle_pad_old_x.push_back(circle_pad_new_x);
+    circle_pad_old_y.erase(circle_pad_old_y.begin());
+    circle_pad_old_y.push_back(circle_pad_new_y);
 
     Core::Movie::GetInstance().HandlePadAndCircleStatus(state, circle_pad_x, circle_pad_y);
 
@@ -145,6 +193,9 @@ void Module::UpdatePadCallback(u64 userdata, s64 cycles_late) {
     bool pressed = false;
     float x, y;
     std::tie(x, y, pressed) = touch_device->GetStatus();
+    if (!pressed && touch_btn_device) {
+        std::tie(x, y, pressed) = touch_btn_device->GetStatus();
+    }
     touch_entry.x = static_cast<u16>(x * Core::kScreenBottomWidth);
     touch_entry.y = static_cast<u16>(y * Core::kScreenBottomHeight);
     touch_entry.valid.Assign(pressed ? 1 : 0);
@@ -167,6 +218,7 @@ void Module::UpdatePadCallback(u64 userdata, s64 cycles_late) {
 
     // TODO(xperia64): How the 3D Slider is updated by the HID module needs to be RE'd
     // and possibly moved to its own Core::Timing event.
+    mem->pad.sliderstate_3d = (Settings::values.factor_3d / 100.0f);
     system.Kernel().GetSharedPageHandler().Set3DSlider(Settings::values.factor_3d / 100.0f);
 
     // Reschedule recurrent event
@@ -228,7 +280,7 @@ void Module::UpdateGyroscopeCallback(u64 userdata, s64 cycles_late) {
 
     Common::Vec3<float> gyro;
     std::tie(std::ignore, gyro) = motion_device->GetStatus();
-    double stretch = system.perf_stats.GetLastFrameTimeScale();
+    double stretch = system.perf_stats->GetLastFrameTimeScale();
     gyro *= gyroscope_coef * static_cast<float>(stretch);
     gyroscope_entry.x = static_cast<s16>(gyro.x);
     gyroscope_entry.y = static_cast<s16>(gyro.y);
@@ -331,7 +383,7 @@ void Module::Interface::GetGyroscopeLowRawToDpsCoefficient(Kernel::HLERequestCon
 
     IPC::RequestBuilder rb = rp.MakeBuilder(2, 0);
     rb.Push(RESULT_SUCCESS);
-    rb.PushRaw<f32>(gyroscope_coef);
+    rb.Push(gyroscope_coef);
 }
 
 void Module::Interface::GetGyroscopeLowCalibrateParam(Kernel::HLERequestContext& ctx) {

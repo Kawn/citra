@@ -20,7 +20,7 @@
 #include "citra_qt/multiplayer/chat_room.h"
 #include "citra_qt/multiplayer/message.h"
 #include "common/logging/log.h"
-#include "core/announce_multiplayer_session.h"
+#include "network/announce_multiplayer_session.h"
 #include "ui_chat_room.h"
 #ifdef ENABLE_WEB_SERVICE
 #include "web_service/web_backend.h"
@@ -44,10 +44,10 @@ public:
         }
 
         // Handle pings at the beginning and end of message
-        QString fixed_message = QString(" %1 ").arg(message);
-        if (fixed_message.contains(QString(" @%1 ").arg(cur_nickname)) ||
+        QString fixed_message = QStringLiteral(" %1 ").arg(message);
+        if (fixed_message.contains(QStringLiteral(" @%1 ").arg(cur_nickname)) ||
             (!cur_username.isEmpty() &&
-             fixed_message.contains(QString(" @%1 ").arg(cur_username)))) {
+             fixed_message.contains(QStringLiteral(" @%1 ").arg(cur_username)))) {
 
             contains_ping = true;
         } else {
@@ -66,20 +66,20 @@ public:
         if (username.isEmpty() || username == nickname) {
             name = nickname;
         } else {
-            name = QString("%1 (%2)").arg(nickname, username);
+            name = QStringLiteral("%1 (%2)").arg(nickname, username);
         }
 
         QString style, text_color;
         if (ContainsPing()) {
             // Add a background color to these messages
-            style = QString("background-color: %1").arg(ping_color);
+            style = QStringLiteral("background-color: %1").arg(QString::fromStdString(ping_color));
             // Add a font color
-            text_color = "color='#000000'";
+            text_color = QStringLiteral("color='#000000'");
         }
 
-        return QString("[%1] <font color='%2'>&lt;%3&gt;</font> <font style='%4' "
-                       "%5>%6</font>")
-            .arg(timestamp, color, name.toHtmlEscaped(), style, text_color,
+        return QStringLiteral("[%1] <font color='%2'>&lt;%3&gt;</font> <font style='%4' "
+                              "%5>%6</font>")
+            .arg(timestamp, QString::fromStdString(color), name.toHtmlEscaped(), style, text_color,
                  message.toHtmlEscaped());
     }
 
@@ -106,7 +106,8 @@ public:
     }
 
     QString GetSystemChatMessage() const {
-        return QString("[%1] <font color='%2'>* %3</font>").arg(timestamp, system_color, message);
+        return QStringLiteral("[%1] <font color='%2'>* %3</font>")
+            .arg(timestamp, QString::fromStdString(system_color), message);
     }
 
 private:
@@ -146,9 +147,9 @@ public:
         if (username.isEmpty() || username == nickname) {
             name = nickname;
         } else {
-            name = QString("%1 (%2)").arg(nickname, username);
+            name = QStringLiteral("%1 (%2)").arg(nickname, username);
         }
-        return QString("%1\n      %2").arg(name, data(GameNameRole).toString());
+        return QStringLiteral("%1\n      %2").arg(name, data(GameNameRole).toString());
     }
 };
 
@@ -189,9 +190,9 @@ ChatRoom::ChatRoom(QWidget* parent) : QWidget(parent), ui(std::make_unique<Ui::C
     // Connect all the widgets to the appropriate events
     connect(ui->player_view, &QTreeView::customContextMenuRequested, this,
             &ChatRoom::PopupContextMenu);
-    connect(ui->chat_message, &QLineEdit::returnPressed, ui->send_message, &QPushButton::pressed);
-    connect(ui->chat_message, &QLineEdit::textChanged, this, &::ChatRoom::OnChatTextChanged);
-    connect(ui->send_message, &QPushButton::pressed, this, &ChatRoom::OnSendChat);
+    connect(ui->chat_message, &QLineEdit::returnPressed, this, &ChatRoom::OnSendChat);
+    connect(ui->chat_message, &QLineEdit::textChanged, this, &ChatRoom::OnChatTextChanged);
+    connect(ui->send_message, &QPushButton::clicked, this, &ChatRoom::OnSendChat);
 }
 
 ChatRoom::~ChatRoom() = default;
@@ -225,7 +226,7 @@ void ChatRoom::SendModerationRequest(Network::RoomMessageTypes type, const std::
                                    return member.nickname == nickname;
                                });
         if (it == members.end()) {
-            NetworkMessage::ShowError(NetworkMessage::NO_SUCH_USER);
+            NetworkMessage::ErrorManager::ShowError(NetworkMessage::ErrorManager::NO_SUCH_USER);
             return;
         }
         room->SendModerationRequest(type, nickname);
@@ -288,8 +289,8 @@ void ChatRoom::OnStatusMessageReceive(const Network::StatusMessageEntry& status_
     if (status_message.username.empty() || status_message.username == status_message.nickname) {
         name = QString::fromStdString(status_message.nickname);
     } else {
-        name = QString("%1 (%2)").arg(QString::fromStdString(status_message.nickname),
-                                      QString::fromStdString(status_message.username));
+        name = QStringLiteral("%1 (%2)").arg(QString::fromStdString(status_message.nickname),
+                                             QString::fromStdString(status_message.username));
     }
     QString message;
     switch (status_message.type) {
@@ -353,7 +354,8 @@ void ChatRoom::UpdateIconDisplay() {
         if (icon_cache.count(avatar_url)) {
             item->setData(icon_cache.at(avatar_url), Qt::DecorationRole);
         } else {
-            item->setData(QIcon::fromTheme("no_avatar").pixmap(48), Qt::DecorationRole);
+            item->setData(QIcon::fromTheme(QStringLiteral("no_avatar")).pixmap(48),
+                          Qt::DecorationRole);
         }
     }
 }
@@ -373,7 +375,7 @@ void ChatRoom::SetPlayerList(const Network::RoomMember::MemberList& member_list)
             const QUrl url(QString::fromStdString(member.avatar_url));
             QFuture<std::string> future = QtConcurrent::run([url] {
                 WebService::Client client(
-                    QString("%1://%2").arg(url.scheme(), url.host()).toStdString(), "", "");
+                    QStringLiteral("%1://%2").arg(url.scheme(), url.host()).toStdString(), "", "");
                 auto result = client.GetImage(url.path().toStdString(), true);
                 if (result.returned_data.empty()) {
                     LOG_ERROR(WebService, "Failed to get avatar");
@@ -388,7 +390,7 @@ void ChatRoom::SetPlayerList(const Network::RoomMember::MemberList& member_list)
                             return;
                         QPixmap pixmap;
                         if (!pixmap.loadFromData(reinterpret_cast<const u8*>(result.data()),
-                                                 result.size()))
+                                                 static_cast<u32>(result.size())))
                             return;
                         icon_cache[avatar_url] =
                             pixmap.scaled(48, 48, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
@@ -406,8 +408,9 @@ void ChatRoom::SetPlayerList(const Network::RoomMember::MemberList& member_list)
 }
 
 void ChatRoom::OnChatTextChanged() {
-    if (ui->chat_message->text().length() > Network::MaxMessageSize)
-        ui->chat_message->setText(ui->chat_message->text().left(Network::MaxMessageSize));
+    if (ui->chat_message->text().length() > static_cast<int>(Network::MaxMessageSize))
+        ui->chat_message->setText(
+            ui->chat_message->text().left(static_cast<int>(Network::MaxMessageSize)));
 }
 
 void ChatRoom::PopupContextMenu(const QPoint& menu_location) {
@@ -425,7 +428,7 @@ void ChatRoom::PopupContextMenu(const QPoint& menu_location) {
         QAction* view_profile_action = context_menu.addAction(tr("View Profile"));
         connect(view_profile_action, &QAction::triggered, [username] {
             QDesktopServices::openUrl(
-                QString("https://community.citra-emu.org/u/%1").arg(username));
+                QUrl(QStringLiteral("https://community.citra-emu.org/u/%1").arg(username)));
         });
     }
 

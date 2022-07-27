@@ -169,22 +169,102 @@ void Source::ParseConfig(SourceConfiguration::Configuration& config,
         // This will be the starting sample for the first time the buffer is played.
     }
 
+    // TODO(xperia64): Is this in the correct spot in terms of the bit handling order?
+    if (config.partial_embedded_buffer_dirty) {
+        config.partial_embedded_buffer_dirty.Assign(0);
+
+        // As this bit is set by the game, three config options are also updated:
+        // buffer_id (after a check comparing the buffer_id to something, probably to make sure it's
+        // the same buffer?), flags2_raw.is_looping, and length.
+
+        // A quick and dirty way of extending the current buffer is to just read the whole thing
+        // again with the new length. Note that this uses the latched physical address instead of
+        // whatever is in config, because that may be invalid.
+        const u8* const memory =
+            memory_system->GetPhysicalPointer(state.current_buffer_physical_address & 0xFFFFFFFC);
+
+        // TODO(xperia64): This could potentially be optimized by only decoding the new data and
+        // appending that to the buffer.
+        if (memory) {
+            const unsigned num_channels = state.mono_or_stereo == MonoOrStereo::Stereo ? 2 : 1;
+            bool valid = false;
+            switch (state.format) {
+            case Format::PCM8:
+                // TODO(xperia64): This may just work fine like PCM16, but I haven't tested and
+                // couldn't find any test case games
+                UNIMPLEMENTED_MSG("{} not handled for partial buffer updates", "PCM8");
+                // state.current_buffer = Codec::DecodePCM8(num_channels, memory, config.length);
+                break;
+            case Format::PCM16:
+                state.current_buffer = Codec::DecodePCM16(num_channels, memory, config.length);
+                valid = true;
+                break;
+            case Format::ADPCM:
+                // TODO(xperia64): Are partial embedded buffer updates even valid for ADPCM? What
+                // about the adpcm state?
+                UNIMPLEMENTED_MSG("{} not handled for partial buffer updates", "ADPCM");
+                /* state.current_buffer =
+                    Codec::DecodeADPCM(memory, config.length, state.adpcm_coeffs,
+                   state.adpcm_state); */
+                break;
+            default:
+                UNIMPLEMENTED();
+                break;
+            }
+
+            // Again, because our interpolation consumes samples instead of using an index, let's
+            // just re-consume the samples up to the current sample number. There may be some
+            // imprecision here with the current sample number, as Detective Pikachu sounds a little
+            // rough at times.
+            if (valid) {
+
+                // TODO(xperia64): Tomodachi life apparently can decrease config.length when the
+                // user skips dialog. I don't know the correct behavior, but to avoid crashing, just
+                // reset the current sample number to 0 and don't try to truncate the buffer
+                if (state.current_buffer.size() < state.current_sample_number) {
+                    state.current_sample_number = 0;
+                } else {
+                    state.current_buffer.erase(
+                        state.current_buffer.begin(),
+                        std::next(state.current_buffer.begin(), state.current_sample_number));
+                }
+            }
+        }
+        LOG_TRACE(Audio_DSP, "partially updating embedded buffer addr={:#010x} len={} id={}",
+                  state.current_buffer_physical_address, config.length, config.buffer_id);
+    }
+
     if (config.embedded_buffer_dirty) {
         config.embedded_buffer_dirty.Assign(0);
-        state.input_queue.emplace(Buffer{
-            config.physical_address,
-            config.length,
-            static_cast<u8>(config.adpcm_ps),
-            {config.adpcm_yn[0], config.adpcm_yn[1]},
-            static_cast<bool>(config.adpcm_dirty),
-            static_cast<bool>(config.is_looping),
-            config.buffer_id,
-            state.mono_or_stereo,
-            state.format,
-            false,
-            play_position,
-            false,
-        });
+        // HACK
+        // Luigi's Mansion Dark Moon configures the embedded buffer with an extremely large value
+        // for length, causing the Dequeue method to allocate a buffer of that size, eating up all
+        // of the users RAM. It appears that the game is calculating the length of the sample by
+        // using some value from the DSP and subtracting another value, which causes it to
+        // underflow. We need to investigate further into what value the game is reading from and
+        // fix that, but as a stop gap, we can just prevent these underflowed values from playing in
+        // the mean time
+        if (static_cast<s32>(config.length) < 0) {
+            LOG_ERROR(Audio_DSP,
+                      "Skipping embedded buffer sample! Game passed in improper value for length. "
+                      "addr {:X} length {:X}",
+                      config.physical_address, config.length);
+        } else {
+            state.input_queue.emplace(Buffer{
+                config.physical_address,
+                config.length,
+                static_cast<u8>(config.adpcm_ps),
+                {config.adpcm_yn[0], config.adpcm_yn[1]},
+                static_cast<bool>(config.adpcm_dirty),
+                static_cast<bool>(config.is_looping),
+                config.buffer_id,
+                state.mono_or_stereo,
+                state.format,
+                false,
+                play_position,
+                false,
+            });
+        }
         LOG_TRACE(Audio_DSP, "enqueuing embedded addr={:#010x} len={} id={} start={}",
                   config.physical_address, config.length, config.buffer_id,
                   static_cast<u32>(config.play_position));
@@ -201,20 +281,27 @@ void Source::ParseConfig(SourceConfiguration::Configuration& config,
         for (std::size_t i = 0; i < 4; i++) {
             if (config.buffers_dirty & (1 << i)) {
                 const auto& b = config.buffers[i];
-                state.input_queue.emplace(Buffer{
-                    b.physical_address,
-                    b.length,
-                    static_cast<u8>(b.adpcm_ps),
-                    {b.adpcm_yn[0], b.adpcm_yn[1]},
-                    b.adpcm_dirty != 0,
-                    b.is_looping != 0,
-                    b.buffer_id,
-                    state.mono_or_stereo,
-                    state.format,
-                    true,
-                    {}, // 0 in u32_dsp
-                    false,
-                });
+                if (static_cast<s32>(b.length) < 0) {
+                    LOG_ERROR(Audio_DSP,
+                              "Skipping buffer queue sample! Game passed in improper value for "
+                              "length. addr {:X} length {:X}",
+                              b.physical_address, b.length);
+                } else {
+                    state.input_queue.emplace(Buffer{
+                        b.physical_address,
+                        b.length,
+                        static_cast<u8>(b.adpcm_ps),
+                        {b.adpcm_yn[0], b.adpcm_yn[1]},
+                        b.adpcm_dirty != 0,
+                        b.is_looping != 0,
+                        b.buffer_id,
+                        state.mono_or_stereo,
+                        state.format,
+                        true,
+                        {}, // 0 in u32_dsp
+                        false,
+                    });
+                }
                 LOG_TRACE(Audio_DSP, "enqueuing queued {} addr={:#010x} len={} id={}", i,
                           b.physical_address, b.length, b.buffer_id);
             }
@@ -258,7 +345,6 @@ void Source::GenerateFrame() {
             break;
         case InterpolationMode::Polyphase:
             // TODO(merry): Implement polyphase interpolation
-            LOG_DEBUG(Audio_DSP, "Polyphase interpolation unimplemented; falling back to linear");
             AudioInterp::Linear(state.interp_state, state.current_buffer, state.rate_multiplier,
                                 current_frame, frame_position);
             break;
@@ -267,7 +353,9 @@ void Source::GenerateFrame() {
             break;
         }
     }
-    state.next_sample_number += static_cast<u32>(frame_position);
+    // TODO(jroweboy): Keep track of frame_position independently so that it doesn't lose precision
+    // over time
+    state.next_sample_number += static_cast<u32>(frame_position * state.rate_multiplier);
 
     state.filters.ProcessFrame(current_frame);
 }
@@ -319,6 +407,7 @@ bool Source::DequeueBuffer() {
     // the first playthrough starts at play_position, loops start at the beginning of the buffer
     state.current_sample_number = (!buf.has_played) ? buf.play_position : 0;
     state.next_sample_number = state.current_sample_number;
+    state.current_buffer_physical_address = buf.physical_address;
     state.current_buffer_id = buf.buffer_id;
     state.buffer_update = buf.from_queue && !buf.has_played;
 

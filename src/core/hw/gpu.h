@@ -6,10 +6,13 @@
 
 #include <cstddef>
 #include <type_traits>
+#include <boost/serialization/access.hpp>
+#include <boost/serialization/binary_object.hpp>
 #include "common/assert.h"
 #include "common/bit_field.h"
 #include "common/common_funcs.h"
 #include "common/common_types.h"
+#include "core/core_timing.h"
 
 namespace Memory {
 class MemorySystem;
@@ -17,44 +20,31 @@ class MemorySystem;
 
 namespace GPU {
 
-constexpr float SCREEN_REFRESH_RATE = 60;
+// Measured on hardware to be 2240568 timer cycles or 4481136 ARM11 cycles
+constexpr u64 frame_ticks = 4481136ull;
+
+// Refresh rate defined by ratio of ARM11 frequency to ARM11 ticks per frame
+// (268,111,856) / (4,481,136) = 59.83122493939037Hz
+constexpr double SCREEN_REFRESH_RATE = BASE_CLOCK_RATE_ARM11 / static_cast<double>(frame_ticks);
 
 // Returns index corresponding to the Regs member labeled by field_name
-// TODO: Due to Visual studio bug 209229, offsetof does not return constant expressions
-//       when used with array elements (e.g. GPU_REG_INDEX(memory_fill_config[0])).
-//       For details cf.
-//       https://connect.microsoft.com/VisualStudio/feedback/details/209229/offsetof-does-not-produce-a-constant-expression-for-array-members
-//       Hopefully, this will be fixed sometime in the future.
-//       For lack of better alternatives, we currently hardcode the offsets when constant
-//       expressions are needed via GPU_REG_INDEX_WORKAROUND (on sane compilers, static_asserts
-//       will then make sure the offsets indeed match the automatically calculated ones).
 #define GPU_REG_INDEX(field_name) (offsetof(GPU::Regs, field_name) / sizeof(u32))
-#if defined(_MSC_VER)
-#define GPU_REG_INDEX_WORKAROUND(field_name, backup_workaround_index) (backup_workaround_index)
-#else
-// NOTE: Yeah, hacking in a static_assert here just to workaround the lacking MSVC compiler
-//       really is this annoying. This macro just forwards its first argument to GPU_REG_INDEX
-//       and then performs a (no-op) cast to std::size_t iff the second argument matches the
-//       expected field offset. Otherwise, the compiler will fail to compile this code.
-#define GPU_REG_INDEX_WORKAROUND(field_name, backup_workaround_index)                              \
-    ((typename std::enable_if<backup_workaround_index == GPU_REG_INDEX(field_name),                \
-                              std::size_t>::type) GPU_REG_INDEX(field_name))
-#endif
+
+// Returns index corresponding to the Regs::FramebufferConfig labeled by field_name
+// screen_id is a subscript for Regs::framebuffer_config
+#define GPU_FRAMEBUFFER_REG_INDEX(screen_id, field_name)                                           \
+    ((offsetof(GPU::Regs, framebuffer_config) +                                                    \
+      sizeof(GPU::Regs::FramebufferConfig) * (screen_id) +                                         \
+      offsetof(GPU::Regs::FramebufferConfig, field_name)) /                                        \
+     sizeof(u32))
 
 // MMIO region 0x1EFxxxxx
 struct Regs {
 
 // helper macro to make sure the defined structures are of the expected size.
-#if defined(_MSC_VER)
-// TODO: MSVC does not support using sizeof() on non-static data members even though this
-//       is technically allowed since C++11. This macro should be enabled once MSVC adds
-//       support for that.
-#define ASSERT_MEMBER_SIZE(name, size_in_bytes)
-#else
 #define ASSERT_MEMBER_SIZE(name, size_in_bytes)                                                    \
     static_assert(sizeof(name) == size_in_bytes,                                                   \
                   "Structure size and register block length don't match")
-#endif
 
     // Components are laid out in reverse byte order, most significant bits first.
     enum class PixelFormat : u32 {
@@ -296,13 +286,15 @@ private:
     static inline u32 DecodeAddressRegister(u32 register_value) {
         return register_value * 8;
     }
+
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int) {
+        ar& boost::serialization::make_binary_object(this, sizeof(Regs));
+    }
+    friend class boost::serialization::access;
 };
 static_assert(std::is_standard_layout<Regs>::value, "Structure does not use standard layout");
 
-// TODO: MSVC does not support using offsetof() on non-static data members even though this
-//       is technically allowed since C++11. This macro should be enabled once MSVC adds
-//       support for that.
-#ifndef _MSC_VER
 #define ASSERT_REG_POSITION(field_name, position)                                                  \
     static_assert(offsetof(Regs, field_name) == position * 4,                                      \
                   "Field " #field_name " has invalid position")
@@ -315,7 +307,6 @@ ASSERT_REG_POSITION(display_transfer_config, 0x00300);
 ASSERT_REG_POSITION(command_processor_config, 0x00638);
 
 #undef ASSERT_REG_POSITION
-#endif // !defined(_MSC_VER)
 
 // The total number of registers is chosen arbitrarily, but let's make sure it's not some odd value
 // anyway.

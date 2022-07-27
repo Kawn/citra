@@ -15,6 +15,9 @@ class System;
 
 namespace Service::PTM {
 
+/// Id of the SharedExtData archive used by the PTM process
+constexpr std::array<u8, 12> ptm_shared_extdata_id = {0, 0, 0, 0, 0x0B, 0, 0, 0xF0, 0, 0, 0, 0};
+
 /// Charge levels used by PTM functions
 enum class ChargeLevels : u32 {
     CriticalBattery = 1,
@@ -134,7 +137,7 @@ public:
          */
         void CheckNew3DS(Kernel::HLERequestContext& ctx);
 
-    private:
+    protected:
         std::shared_ptr<Module> ptm;
     };
 
@@ -142,8 +145,18 @@ private:
     bool shell_open = true;
     bool battery_is_charging = true;
     bool pedometer_is_counting = false;
+
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int) {
+        ar& shell_open;
+        ar& battery_is_charging;
+        ar& pedometer_is_counting;
+    }
+    friend class boost::serialization::access;
 };
 
 void InstallInterfaces(Core::System& system);
 
 } // namespace Service::PTM
+
+BOOST_CLASS_EXPORT_KEY(Service::PTM::Module)

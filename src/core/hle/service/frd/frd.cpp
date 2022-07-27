@@ -3,6 +3,7 @@
 // Refer to the license.txt file included.
 
 #include <array>
+#include <cstring>
 #include <vector>
 #include "common/assert.h"
 #include "common/logging/log.h"
@@ -10,9 +11,12 @@
 #include "core/core.h"
 #include "core/hle/ipc_helpers.h"
 #include "core/hle/result.h"
+#include "core/hle/service/cfg/cfg.h"
 #include "core/hle/service/frd/frd.h"
 #include "core/hle/service/frd/frd_a.h"
 #include "core/hle/service/frd/frd_u.h"
+
+SERVICE_CONSTRUCT_IMPL(Service::FRD::Module)
 
 namespace Service::FRD {
 
@@ -29,52 +33,52 @@ void Module::Interface::GetMyPresence(Kernel::HLERequestContext& ctx) {
 
     IPC::RequestBuilder rb = rp.MakeBuilder(1, 2);
     rb.Push(RESULT_SUCCESS);
-    rb.PushStaticBuffer(buffer, 0);
+    rb.PushStaticBuffer(std::move(buffer), 0);
 
     LOG_WARNING(Service_FRD, "(STUBBED) called");
 }
 
 void Module::Interface::GetFriendKeyList(Kernel::HLERequestContext& ctx) {
     IPC::RequestParser rp(ctx, 0x11, 2, 0);
-    u32 unknown = rp.Pop<u32>();
-    u32 frd_count = rp.Pop<u32>();
+    const u32 unknown = rp.Pop<u32>();
+    const u32 frd_count = rp.Pop<u32>();
 
     std::vector<u8> buffer(sizeof(FriendKey) * frd_count, 0);
 
     IPC::RequestBuilder rb = rp.MakeBuilder(2, 2);
     rb.Push(RESULT_SUCCESS);
     rb.Push<u32>(0); // 0 friends
-    rb.PushStaticBuffer(buffer, 0);
+    rb.PushStaticBuffer(std::move(buffer), 0);
 
     LOG_WARNING(Service_FRD, "(STUBBED) called, unknown={}, frd_count={}", unknown, frd_count);
 }
 
 void Module::Interface::GetFriendProfile(Kernel::HLERequestContext& ctx) {
     IPC::RequestParser rp(ctx, 0x15, 1, 2);
-    u32 count = rp.Pop<u32>();
-    std::vector<u8> frd_keys = rp.PopStaticBuffer();
+    const u32 count = rp.Pop<u32>();
+    const std::vector<u8> frd_keys = rp.PopStaticBuffer();
     ASSERT(frd_keys.size() == count * sizeof(FriendKey));
 
     std::vector<u8> buffer(sizeof(Profile) * count, 0);
 
     IPC::RequestBuilder rb = rp.MakeBuilder(1, 2);
     rb.Push(RESULT_SUCCESS);
-    rb.PushStaticBuffer(buffer, 0);
+    rb.PushStaticBuffer(std::move(buffer), 0);
 
     LOG_WARNING(Service_FRD, "(STUBBED) called, count={}", count);
 }
 
 void Module::Interface::GetFriendAttributeFlags(Kernel::HLERequestContext& ctx) {
     IPC::RequestParser rp(ctx, 0x17, 1, 2);
-    u32 count = rp.Pop<u32>();
-    std::vector<u8> frd_keys = rp.PopStaticBuffer();
+    const u32 count = rp.Pop<u32>();
+    const std::vector<u8> frd_keys = rp.PopStaticBuffer();
     ASSERT(frd_keys.size() == count * sizeof(FriendKey));
 
     // TODO:(mailwl) figure out AttributeFlag size and zero all buffer. Assume 1 byte
     std::vector<u8> buffer(1 * count, 0);
     IPC::RequestBuilder rb = rp.MakeBuilder(1, 2);
     rb.Push(RESULT_SUCCESS);
-    rb.PushStaticBuffer(buffer, 0);
+    rb.PushStaticBuffer(std::move(buffer), 0);
 
     LOG_WARNING(Service_FRD, "(STUBBED) called, count={}", count);
 }
@@ -93,16 +97,21 @@ void Module::Interface::GetMyScreenName(Kernel::HLERequestContext& ctx) {
     IPC::RequestBuilder rb = rp.MakeBuilder(7, 0);
 
     struct ScreenName {
-        std::array<char16_t, 12> name;
+        // 20 bytes according to 3dbrew
+        std::array<char16_t, 10> name;
     };
 
-    // TODO: (mailwl) get the name from config
-    ScreenName screen_name{u"Citra"};
+    auto cfg = Service::CFG::GetModule(frd->system);
+    ASSERT_MSG(cfg, "CFG Module missing!");
+    auto username = cfg->GetUsername();
+    ASSERT_MSG(username.length() <= 10, "Username longer than expected!");
+    ScreenName screen_name{};
+    std::memcpy(screen_name.name.data(), username.data(), username.length() * sizeof(char16_t));
 
     rb.Push(RESULT_SUCCESS);
     rb.PushRaw(screen_name);
 
-    LOG_WARNING(Service_FRD, "(STUBBED) called");
+    LOG_INFO(Service_FRD, "returning the username defined in cfg");
 }
 
 void Module::Interface::UnscrambleLocalFriendCode(Kernel::HLERequestContext& ctx) {
@@ -111,7 +120,7 @@ void Module::Interface::UnscrambleLocalFriendCode(Kernel::HLERequestContext& ctx
 
     IPC::RequestParser rp(ctx, 0x1C, 1, 2);
     const u32 friend_code_count = rp.Pop<u32>();
-    std::vector<u8> scrambled_friend_codes = rp.PopStaticBuffer();
+    const std::vector<u8> scrambled_friend_codes = rp.PopStaticBuffer();
     ASSERT_MSG(scrambled_friend_codes.size() == (friend_code_count * scrambled_friend_code_size),
                "Wrong input buffer size");
 
@@ -133,7 +142,7 @@ void Module::Interface::UnscrambleLocalFriendCode(Kernel::HLERequestContext& ctx
     LOG_WARNING(Service_FRD, "(STUBBED) called");
     IPC::RequestBuilder rb = rp.MakeBuilder(1, 2);
     rb.Push(RESULT_SUCCESS);
-    rb.PushStaticBuffer(unscrambled_friend_codes, 0);
+    rb.PushStaticBuffer(std::move(unscrambled_friend_codes), 0);
 }
 
 void Module::Interface::SetClientSdkVersion(Kernel::HLERequestContext& ctx) {
@@ -147,12 +156,12 @@ void Module::Interface::SetClientSdkVersion(Kernel::HLERequestContext& ctx) {
     LOG_WARNING(Service_FRD, "(STUBBED) called, version: 0x{:08X}", version);
 }
 
-Module::Module() = default;
+Module::Module(Core::System& system) : system(system){};
 Module::~Module() = default;
 
 void InstallInterfaces(Core::System& system) {
     auto& service_manager = system.ServiceManager();
-    auto frd = std::make_shared<Module>();
+    auto frd = std::make_shared<Module>(system);
     std::make_shared<FRD_U>(frd)->InstallAsService(service_manager);
     std::make_shared<FRD_A>(frd)->InstallAsService(service_manager);
 }

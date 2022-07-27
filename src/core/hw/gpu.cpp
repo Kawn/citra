@@ -11,6 +11,7 @@
 #include "common/logging/log.h"
 #include "common/microprofile.h"
 #include "common/vector_math.h"
+#include "core/core.h"
 #include "core/core_timing.h"
 #include "core/hle/service/gsp/gsp.h"
 #include "core/hw/gpu.h"
@@ -29,8 +30,6 @@ namespace GPU {
 Regs g_regs;
 Memory::MemorySystem* g_memory;
 
-/// 268MHz CPU clocks / 60Hz frames per second
-const u64 frame_ticks = static_cast<u64>(BASE_CLOCK_RATE_ARM11 / SCREEN_REFRESH_RATE);
 /// Event id for CoreTiming
 static Core::TimingEventType* vblank_event;
 
@@ -66,7 +65,7 @@ static Common::Vec4<u8> DecodePixel(Regs::PixelFormat input_format, const u8* sr
         return Color::DecodeRGBA4(src_pixel);
 
     default:
-        LOG_ERROR(HW_GPU, "Unknown source framebuffer format {:x}", static_cast<u32>(input_format));
+        LOG_ERROR(HW_GPU, "Unknown source framebuffer format {:x}", input_format);
         return {0, 0, 0, 0};
     }
 }
@@ -401,8 +400,8 @@ inline void Write(u32 addr, const T data) {
     switch (index) {
 
     // Memory fills are triggered once the fill value is written.
-    case GPU_REG_INDEX_WORKAROUND(memory_fill_config[0].trigger, 0x00004 + 0x3):
-    case GPU_REG_INDEX_WORKAROUND(memory_fill_config[1].trigger, 0x00008 + 0x3): {
+    case GPU_REG_INDEX(memory_fill_config[0].trigger):
+    case GPU_REG_INDEX(memory_fill_config[1].trigger): {
         const bool is_second_filler = (index != GPU_REG_INDEX(memory_fill_config[0].trigger));
         auto& config = g_regs.memory_fill_config[is_second_filler];
 
@@ -471,14 +470,7 @@ inline void Write(u32 addr, const T data) {
         if (config.trigger & 1) {
             MICROPROFILE_SCOPE(GPU_CmdlistProcessing);
 
-            u32* buffer = (u32*)g_memory->GetPhysicalPointer(config.GetPhysicalAddress());
-
-            if (Pica::g_debug_context && Pica::g_debug_context->recorder) {
-                Pica::g_debug_context->recorder->MemoryAccessed((u8*)buffer, config.size,
-                                                                config.GetPhysicalAddress());
-            }
-
-            Pica::CommandProcessor::ProcessCommandList(buffer, config.size);
+            Pica::CommandProcessor::ProcessCommandList(config.GetPhysicalAddress(), config.size);
 
             g_regs.command_processor_config.trigger = 0;
         }

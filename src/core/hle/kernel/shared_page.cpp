@@ -4,6 +4,8 @@
 
 #include <chrono>
 #include <cstring>
+#include "common/archives.h"
+#include "common/assert.h"
 #include "core/core.h"
 #include "core/core_timing.h"
 #include "core/hle/kernel/shared_page.h"
@@ -13,11 +15,24 @@
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+SERIALIZE_EXPORT_IMPL(SharedPage::Handler)
+
+namespace boost::serialization {
+
+template <class Archive>
+void load_construct_data(Archive& ar, SharedPage::Handler* t, const unsigned int) {
+    ::new (t) SharedPage::Handler(Core::System::GetInstance().CoreTiming());
+}
+template void load_construct_data<iarchive>(iarchive& ar, SharedPage::Handler* t,
+                                            const unsigned int);
+
+} // namespace boost::serialization
+
 namespace SharedPage {
 
 static std::chrono::seconds GetInitTime() {
-    u64 override_init_time = Core::Movie::GetInstance().GetOverrideInitTime();
-    if (override_init_time) {
+    const u64 override_init_time = Core::Movie::GetInstance().GetOverrideInitTime();
+    if (override_init_time != 0) {
         // Override the clock init time with the one in the movie
         return std::chrono::seconds(override_init_time);
     }
@@ -34,6 +49,8 @@ static std::chrono::seconds GetInitTime() {
     }
     case Settings::InitClock::FixedTime:
         return std::chrono::seconds(Settings::values.init_time);
+    default:
+        UNREACHABLE_MSG("Invalid InitClock value ({})", Settings::values.init_clock);
     }
 }
 
@@ -56,11 +73,10 @@ Handler::Handler(Core::Timing& timing) : timing(timing) {
     using namespace std::placeholders;
     update_time_event = timing.RegisterEvent("SharedPage::UpdateTimeCallback",
                                              std::bind(&Handler::UpdateTimeCallback, this, _1, _2));
-    timing.ScheduleEvent(0, update_time_event);
+    timing.ScheduleEvent(0, update_time_event, 0, 0);
 
-    float slidestate =
-        Settings::values.toggle_3d ? (float_le)Settings::values.factor_3d / 100 : 0.0f;
-    shared_page.sliderstate_3d = slidestate;
+    float slidestate = Settings::values.factor_3d / 100.0f;
+    shared_page.sliderstate_3d = static_cast<float_le>(slidestate);
 }
 
 /// Gets system time in 3DS format. The epoch is Jan 1900, and the unit is millisecond.

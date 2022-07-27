@@ -4,9 +4,14 @@
 
 #include <algorithm>
 #include <memory>
+#include <boost/serialization/array.hpp>
+#include <boost/serialization/bitset.hpp>
+#include <boost/serialization/shared_ptr.hpp>
+#include "common/archives.h"
 #include "common/assert.h"
 #include "common/common_funcs.h"
 #include "common/logging/log.h"
+#include "common/serialization/boost_vector.hpp"
 #include "core/hle/kernel/errors.h"
 #include "core/hle/kernel/memory.h"
 #include "core/hle/kernel/process.h"
@@ -15,10 +20,36 @@
 #include "core/hle/kernel/vm_manager.h"
 #include "core/memory.h"
 
+SERIALIZE_EXPORT_IMPL(Kernel::Process)
+SERIALIZE_EXPORT_IMPL(Kernel::CodeSet)
+
 namespace Kernel {
 
-SharedPtr<CodeSet> KernelSystem::CreateCodeSet(std::string name, u64 program_id) {
-    SharedPtr<CodeSet> codeset(new CodeSet(*this));
+template <class Archive>
+void Process::serialize(Archive& ar, const unsigned int file_version) {
+    ar& boost::serialization::base_object<Object>(*this);
+    ar& handle_table;
+    ar& codeset; // TODO: Replace with apploader reference
+    ar& resource_limit;
+    ar& svc_access_mask;
+    ar& handle_table_size;
+    ar&(boost::container::vector<AddressMapping, boost::container::dtl::static_storage_allocator<
+                                                     AddressMapping, 8, 0, true>>&)address_mappings;
+    ar& flags.raw;
+    ar& kernel_version;
+    ar& ideal_processor;
+    ar& status;
+    ar& process_id;
+    ar& vm_manager;
+    ar& memory_used;
+    ar& memory_region;
+    ar& tls_slots;
+}
+
+SERIALIZE_IMPL(Process)
+
+std::shared_ptr<CodeSet> KernelSystem::CreateCodeSet(std::string name, u64 program_id) {
+    auto codeset{std::make_shared<CodeSet>(*this)};
 
     codeset->name = std::move(name);
     codeset->program_id = program_id;
@@ -29,8 +60,8 @@ SharedPtr<CodeSet> KernelSystem::CreateCodeSet(std::string name, u64 program_id)
 CodeSet::CodeSet(KernelSystem& kernel) : Object(kernel) {}
 CodeSet::~CodeSet() {}
 
-SharedPtr<Process> KernelSystem::CreateProcess(SharedPtr<CodeSet> code_set) {
-    SharedPtr<Process> process(new Process(*this));
+std::shared_ptr<Process> KernelSystem::CreateProcess(std::shared_ptr<CodeSet> code_set) {
+    auto process{std::make_shared<Process>(*this)};
 
     process->codeset = std::move(code_set);
     process->flags.raw = 0;
@@ -114,13 +145,29 @@ void Process::ParseKernelCaps(const u32* kernel_caps, std::size_t len) {
     }
 }
 
+void Process::Set3dsxKernelCaps() {
+    svc_access_mask.set();
+
+    address_mappings = {
+        {0x1FF50000, 0x8000, true},    // part of DSP RAM
+        {0x1FF70000, 0x8000, true},    // part of DSP RAM
+        {0x1F000000, 0x600000, false}, // entire VRAM
+    };
+
+    // Similar to Rosalina, we set kernel version to a recent one.
+    // This is 11.2.0, to be consistent with core/hle/kernel/config_mem.cpp
+    // TODO: refactor kernel version out so it is configurable and consistent
+    // among all relevant places.
+    kernel_version = 0x234;
+}
+
 void Process::Run(s32 main_thread_priority, u32 stack_size) {
     memory_region = kernel.GetMemoryRegion(flags.memory_region);
 
     auto MapSegment = [&](CodeSet::Segment& segment, VMAPermission permissions,
                           MemoryState memory_state) {
         HeapAllocate(segment.addr, segment.size, permissions, memory_state, true);
-        kernel.memory.WriteBlock(*this, segment.addr, codeset->memory->data() + segment.offset,
+        kernel.memory.WriteBlock(*this, segment.addr, codeset->memory.data() + segment.offset,
                                  segment.size);
     };
 
@@ -142,7 +189,7 @@ void Process::Run(s32 main_thread_priority, u32 stack_size) {
     status = ProcessStatus::Running;
 
     vm_manager.LogLayout(Log::Level::Debug);
-    Kernel::SetupMainThread(kernel, codeset->entrypoint, main_thread_priority, this);
+    Kernel::SetupMainThread(kernel, codeset->entrypoint, main_thread_priority, SharedFrom(this));
 }
 
 VAddr Process::GetLinearHeapAreaAddress() const {
@@ -191,7 +238,7 @@ ResultVal<VAddr> Process::HeapAllocate(VAddr target, u32 size, VMAPermission per
         std::fill(kernel.memory.GetFCRAMPointer(interval.lower()),
                   kernel.memory.GetFCRAMPointer(interval.upper()), 0);
         auto vma = vm_manager.MapBackingMemory(interval_target,
-                                               kernel.memory.GetFCRAMPointer(interval.lower()),
+                                               kernel.memory.GetFCRAMRef(interval.lower()),
                                                interval_size, memory_state);
         ASSERT(vma.Succeeded());
         vm_manager.Reprotect(vma.Unwrap(), perms);
@@ -219,7 +266,7 @@ ResultCode Process::HeapFree(VAddr target, u32 size) {
     // Free heaps block by block
     CASCADE_RESULT(auto backing_blocks, vm_manager.GetBackingBlocksForRange(target, size));
     for (const auto [backing_memory, block_size] : backing_blocks) {
-        memory_region->Free(kernel.memory.GetFCRAMOffset(backing_memory), block_size);
+        memory_region->Free(kernel.memory.GetFCRAMOffset(backing_memory.GetPtr()), block_size);
     }
 
     ResultCode result = vm_manager.UnmapRange(target, size);
@@ -263,9 +310,9 @@ ResultVal<VAddr> Process::LinearAllocate(VAddr target, u32 size, VMAPermission p
         }
     }
 
-    u8* backing_memory = kernel.memory.GetFCRAMPointer(physical_offset);
+    auto backing_memory = kernel.memory.GetFCRAMRef(physical_offset);
 
-    std::fill(backing_memory, backing_memory + size, 0);
+    std::fill(backing_memory.GetPtr(), backing_memory.GetPtr() + size, 0);
     auto vma = vm_manager.MapBackingMemory(target, backing_memory, size, MemoryState::Continuous);
     ASSERT(vma.Succeeded());
     vm_manager.Reprotect(vma.Unwrap(), perms);
@@ -307,7 +354,7 @@ ResultCode Process::LinearFree(VAddr target, u32 size) {
 ResultCode Process::Map(VAddr target, VAddr source, u32 size, VMAPermission perms,
                         bool privileged) {
     LOG_DEBUG(Kernel, "Map memory target={:08X}, source={:08X}, size={:08X}, perms={:08X}", target,
-              source, size, static_cast<u8>(perms));
+              source, size, perms);
     if (source < Memory::HEAP_VADDR || source + size > Memory::HEAP_VADDR_END ||
         source + size < source) {
         LOG_ERROR(Kernel, "Invalid source address");
@@ -362,7 +409,7 @@ ResultCode Process::Map(VAddr target, VAddr source, u32 size, VMAPermission perm
 ResultCode Process::Unmap(VAddr target, VAddr source, u32 size, VMAPermission perms,
                           bool privileged) {
     LOG_DEBUG(Kernel, "Unmap memory target={:08X}, source={:08X}, size={:08X}, perms={:08X}",
-              target, source, size, static_cast<u8>(perms));
+              target, source, size, perms);
     if (source < Memory::HEAP_VADDR || source + size > Memory::HEAP_VADDR_END ||
         source + size < source) {
         LOG_ERROR(Kernel, "Invalid source address");
@@ -402,9 +449,8 @@ ResultCode Process::Unmap(VAddr target, VAddr source, u32 size, VMAPermission pe
 }
 
 Kernel::Process::Process(KernelSystem& kernel)
-    : Object(kernel), handle_table(kernel), kernel(kernel), vm_manager(kernel.memory) {
-
-    kernel.memory.RegisterPageTable(&vm_manager.page_table);
+    : Object(kernel), handle_table(kernel), vm_manager(kernel.memory), kernel(kernel) {
+    kernel.memory.RegisterPageTable(vm_manager.page_table);
 }
 Kernel::Process::~Process() {
     // Release all objects this process owns first so that their potential destructor can do clean
@@ -413,13 +459,13 @@ Kernel::Process::~Process() {
     // memory etc.) even if they are still referenced by other processes.
     handle_table.Clear();
 
-    kernel.memory.UnregisterPageTable(&vm_manager.page_table);
+    kernel.memory.UnregisterPageTable(vm_manager.page_table);
 }
 
-SharedPtr<Process> KernelSystem::GetProcessById(u32 process_id) const {
+std::shared_ptr<Process> KernelSystem::GetProcessById(u32 process_id) const {
     auto itr = std::find_if(
         process_list.begin(), process_list.end(),
-        [&](const SharedPtr<Process>& process) { return process->process_id == process_id; });
+        [&](const std::shared_ptr<Process>& process) { return process->process_id == process_id; });
 
     if (itr == process_list.end())
         return nullptr;

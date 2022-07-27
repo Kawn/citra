@@ -9,6 +9,7 @@
 #include <cryptopp/aes.h>
 #include <cryptopp/modes.h>
 #include <fmt/format.h>
+#include "common/common_paths.h"
 #include "common/file_util.h"
 #include "common/logging/log.h"
 #include "common/string_util.h"
@@ -30,6 +31,7 @@
 #include "core/hle/service/am/am_sys.h"
 #include "core/hle/service/am/am_u.h"
 #include "core/hle/service/fs/archive.h"
+#include "core/hle/service/fs/fs_user.h"
 #include "core/loader/loader.h"
 #include "core/loader/smdh.h"
 
@@ -150,21 +152,22 @@ ResultVal<std::size_t> CIAFile::WriteContentData(u64 offset, std::size_t length,
     // Data is not being buffered, so we have to keep track of how much of each <ID>.app
     // has been written since we might get a written buffer which contains multiple .app
     // contents or only part of a larger .app's contents.
-    u64 offset_max = offset + length;
-    for (int i = 0; i < container.GetTitleMetadata().GetContentCount(); i++) {
+    const u64 offset_max = offset + length;
+    for (std::size_t i = 0; i < container.GetTitleMetadata().GetContentCount(); i++) {
         if (content_written[i] < container.GetContentSize(i)) {
             // The size, minimum unwritten offset, and maximum unwritten offset of this content
-            u64 size = container.GetContentSize(i);
-            u64 range_min = container.GetContentOffset(i) + content_written[i];
-            u64 range_max = container.GetContentOffset(i) + size;
+            const u64 size = container.GetContentSize(i);
+            const u64 range_min = container.GetContentOffset(i) + content_written[i];
+            const u64 range_max = container.GetContentOffset(i) + size;
 
             // The unwritten range for this content is beyond the buffered data we have
             // or comes before the buffered data we have, so skip this content ID.
-            if (range_min > offset_max || range_max < offset)
+            if (range_min > offset_max || range_max < offset) {
                 continue;
+            }
 
             // Figure out how much of this content ID we have just recieved/can write out
-            u64 available_to_write = std::min(offset_max, range_max) - range_min;
+            const u64 available_to_write = std::min(offset_max, range_max) - range_min;
 
             // Since the incoming TMD has already been written, we can use GetTitleContentPath
             // to get the content paths to write to.
@@ -172,14 +175,14 @@ ResultVal<std::size_t> CIAFile::WriteContentData(u64 offset, std::size_t length,
             FileUtil::IOFile file(GetTitleContentPath(media_type, tmd.GetTitleID(), i, is_update),
                                   content_written[i] ? "ab" : "wb");
 
-            if (!file.IsOpen())
+            if (!file.IsOpen()) {
                 return FileSys::ERROR_INSUFFICIENT_SPACE;
+            }
 
             std::vector<u8> temp(buffer + (range_min - offset),
                                  buffer + (range_min - offset) + available_to_write);
 
-            if (tmd.GetContentTypeByIndex(static_cast<u16>(i)) &
-                FileSys::TMDContentTypeFlag::Encrypted) {
+            if ((tmd.GetContentTypeByIndex(i) & FileSys::TMDContentTypeFlag::Encrypted) != 0) {
                 decryption_state->content[i].ProcessData(temp.data(), temp.data(), temp.size());
             }
 
@@ -193,7 +196,7 @@ ResultVal<std::size_t> CIAFile::WriteContentData(u64 offset, std::size_t length,
         }
     }
 
-    return MakeResult<std::size_t>(length);
+    return MakeResult(length);
 }
 
 ResultVal<std::size_t> CIAFile::Write(u64 offset, std::size_t length, bool flush,
@@ -373,6 +376,37 @@ InstallStatus InstallCIA(const std::string& path,
         installFile.Close();
 
         LOG_INFO(Service_AM, "Installed {} successfully.", path);
+
+        const FileUtil::DirectoryEntryCallable callback =
+            [&callback](u64* num_entries_out, const std::string& directory,
+                        const std::string& virtual_name) -> bool {
+            const std::string physical_name = directory + DIR_SEP + virtual_name;
+            const bool is_dir = FileUtil::IsDirectory(physical_name);
+            if (!is_dir) {
+                std::unique_ptr<Loader::AppLoader> loader = Loader::GetLoader(physical_name);
+                if (!loader) {
+                    return true;
+                }
+
+                bool executable = false;
+                const auto res = loader->IsExecutable(executable);
+                if (res == Loader::ResultStatus::ErrorEncrypted) {
+                    return false;
+                }
+                return true;
+            } else {
+                return FileUtil::ForeachDirectoryEntry(nullptr, physical_name, callback);
+            }
+        };
+        if (!FileUtil::ForeachDirectoryEntry(
+                nullptr,
+                GetTitlePath(
+                    Service::AM::GetTitleMediaType(container.GetTitleMetadata().GetTitleID()),
+                    container.GetTitleMetadata().GetTitleID()),
+                callback)) {
+            LOG_ERROR(Service_AM, "CIA {} contained encrypted files.", path);
+            return InstallStatus::ErrorEncrypted;
+        }
         return InstallStatus::Success;
     }
 
@@ -415,7 +449,7 @@ std::string GetTitleMetadataPath(Service::FS::MediaType media_type, u64 tid, boo
         Common::SplitPath(entry.virtualName, nullptr, &filename_filename, &filename_extension);
 
         if (filename_extension == ".tmd") {
-            u32 id = std::stoul(filename_filename.c_str(), nullptr, 16);
+            const u32 id = std::stoul(filename_filename, nullptr, 16);
             base_id = std::min(base_id, id);
             update_id = std::max(update_id, id);
         }
@@ -432,16 +466,18 @@ std::string GetTitleMetadataPath(Service::FS::MediaType media_type, u64 tid, boo
     return content_path + fmt::format("{:08x}.tmd", (update ? update_id : base_id));
 }
 
-std::string GetTitleContentPath(Service::FS::MediaType media_type, u64 tid, u16 index,
+std::string GetTitleContentPath(Service::FS::MediaType media_type, u64 tid, std::size_t index,
                                 bool update) {
-    std::string content_path = GetTitlePath(media_type, tid) + "content/";
 
     if (media_type == Service::FS::MediaType::GameCard) {
-        // TODO(shinyquagsire23): get current app file if TID matches?
-        LOG_ERROR(Service_AM, "Request for gamecard partition {} content path unimplemented!",
-                  static_cast<u32>(index));
-        return "";
+        // TODO(B3N30): check if TID matches
+        auto fs_user =
+            Core::System::GetInstance().ServiceManager().GetService<Service::FS::FS_USER>(
+                "fs:USER");
+        return fs_user->GetCurrentGamecardPath();
     }
+
+    std::string content_path = GetTitlePath(media_type, tid) + "content/";
 
     std::string tmd_path = GetTitleMetadataPath(media_type, tid, update);
 
@@ -477,9 +513,11 @@ std::string GetTitlePath(Service::FS::MediaType media_type, u64 tid) {
         return fmt::format("{}{:08x}/{:08x}/", GetMediaTitlePath(media_type), high, low);
 
     if (media_type == Service::FS::MediaType::GameCard) {
-        // TODO(shinyquagsire23): get current app path if TID matches?
-        LOG_ERROR(Service_AM, "Request for gamecard title path unimplemented!");
-        return "";
+        // TODO(B3N30): check if TID matches
+        auto fs_user =
+            Core::System::GetInstance().ServiceManager().GetService<Service::FS::FS_USER>(
+                "fs:USER");
+        return fs_user->GetCurrentGamecardPath();
     }
 
     return "";
@@ -496,9 +534,11 @@ std::string GetMediaTitlePath(Service::FS::MediaType media_type) {
                            SDCARD_ID);
 
     if (media_type == Service::FS::MediaType::GameCard) {
-        // TODO(shinyquagsire23): get current app parent folder if TID matches?
-        LOG_ERROR(Service_AM, "Request for gamecard parent path unimplemented!");
-        return "";
+        // TODO(B3N30): check if TID matchess
+        auto fs_user =
+            Core::System::GetInstance().ServiceManager().GetService<Service::FS::FS_USER>(
+                "fs:USER");
+        return fs_user->GetCurrentGamecardPath();
     }
 
     return "";
@@ -516,7 +556,7 @@ void Module::ScanForTitles(Service::FS::MediaType media_type) {
             std::string tid_string = tid_high.virtualName + tid_low.virtualName;
 
             if (tid_string.length() == TITLE_ID_VALID_LENGTH) {
-                u64 tid = std::stoull(tid_string.c_str(), nullptr, 16);
+                const u64 tid = std::stoull(tid_string, nullptr, 16);
 
                 FileSys::NCCHContainer container(GetTitleContentPath(media_type, tid));
                 if (container.Load() == Loader::ResultStatus::Success)
@@ -576,9 +616,6 @@ void Module::Interface::FindDLCContentInfos(Kernel::HLERequestContext& ctx) {
         std::size_t write_offset = 0;
         // Get info for each content index requested
         for (std::size_t i = 0; i < content_count; i++) {
-            std::shared_ptr<FileUtil::IOFile> romfs_file;
-            u64 romfs_offset = 0;
-
             if (content_requested[i] >= tmd.GetContentCount()) {
                 LOG_ERROR(Service_AM,
                           "Attempted to get info for non-existent content index {:04x}.",
@@ -644,9 +681,6 @@ void Module::Interface::ListDLCContentInfos(Kernel::HLERequestContext& ctx) {
             std::min(start_index + content_count, static_cast<u32>(tmd.GetContentCount()));
         std::size_t write_offset = 0;
         for (u32 i = start_index; i < end_index; i++) {
-            std::shared_ptr<FileUtil::IOFile> romfs_file;
-            u64 romfs_offset = 0;
-
             ContentInfo content_info = {};
             content_info.index = static_cast<u16>(i);
             content_info.type = tmd.GetContentTypeByIndex(i);
@@ -931,8 +965,8 @@ void Module::Interface::GetDLCContentInfoCount(Kernel::HLERequestContext& ctx) {
         rb.Push<u32>(static_cast<u32>(tmd.GetContentCount()));
     } else {
         rb.Push<u32>(1); // Number of content infos plus one
-        LOG_WARNING(Service_AM, "(STUBBED) called media_type={}, title_id=0x{:016x}",
-                    static_cast<u32>(media_type), title_id);
+        LOG_WARNING(Service_AM, "(STUBBED) called media_type={}, title_id=0x{:016x}", media_type,
+                    title_id);
     }
 }
 
@@ -1027,7 +1061,7 @@ void Module::Interface::BeginImportProgram(Kernel::HLERequestContext& ctx) {
     // Citra will store contents out to sdmc/nand
     const FileSys::Path cia_path = {};
     auto file = std::make_shared<Service::FS::File>(
-        am->system, std::make_unique<CIAFile>(media_type), cia_path);
+        am->kernel, std::make_unique<CIAFile>(media_type), cia_path);
 
     am->cia_installing = true;
 
@@ -1035,7 +1069,7 @@ void Module::Interface::BeginImportProgram(Kernel::HLERequestContext& ctx) {
     rb.Push(RESULT_SUCCESS); // No error
     rb.PushCopyObjects(file->Connect());
 
-    LOG_WARNING(Service_AM, "(STUBBED) media_type={}", static_cast<u32>(media_type));
+    LOG_WARNING(Service_AM, "(STUBBED) media_type={}", media_type);
 }
 
 void Module::Interface::BeginImportProgramTemporarily(Kernel::HLERequestContext& ctx) {
@@ -1054,7 +1088,7 @@ void Module::Interface::BeginImportProgramTemporarily(Kernel::HLERequestContext&
     // contents out to sdmc/nand
     const FileSys::Path cia_path = {};
     auto file = std::make_shared<Service::FS::File>(
-        am->system, std::make_unique<CIAFile>(FS::MediaType::NAND), cia_path);
+        am->kernel, std::make_unique<CIAFile>(FS::MediaType::NAND), cia_path);
 
     am->cia_installing = true;
 
@@ -1067,7 +1101,7 @@ void Module::Interface::BeginImportProgramTemporarily(Kernel::HLERequestContext&
 
 void Module::Interface::EndImportProgram(Kernel::HLERequestContext& ctx) {
     IPC::RequestParser rp(ctx, 0x0405, 0, 2); // 0x04050002
-    auto cia = rp.PopObject<Kernel::ClientSession>();
+    [[maybe_unused]] const auto cia = rp.PopObject<Kernel::ClientSession>();
 
     am->ScanForAllTitles();
 
@@ -1078,7 +1112,7 @@ void Module::Interface::EndImportProgram(Kernel::HLERequestContext& ctx) {
 
 void Module::Interface::EndImportProgramWithoutCommit(Kernel::HLERequestContext& ctx) {
     IPC::RequestParser rp(ctx, 0x0406, 0, 2); // 0x04060002
-    auto cia = rp.PopObject<Kernel::ClientSession>();
+    [[maybe_unused]] const auto cia = rp.PopObject<Kernel::ClientSession>();
 
     // Note: This function is basically a no-op for us since we don't use title.db or ticket.db
     // files to keep track of installed titles.
@@ -1091,10 +1125,10 @@ void Module::Interface::EndImportProgramWithoutCommit(Kernel::HLERequestContext&
 
 void Module::Interface::CommitImportPrograms(Kernel::HLERequestContext& ctx) {
     IPC::RequestParser rp(ctx, 0x0407, 3, 2); // 0x040700C2
-    auto media_type = static_cast<Service::FS::MediaType>(rp.Pop<u8>());
-    u32 title_count = rp.Pop<u32>();
-    u8 database = rp.Pop<u8>();
-    auto buffer = rp.PopMappedBuffer();
+    [[maybe_unused]] const auto media_type = static_cast<FS::MediaType>(rp.Pop<u8>());
+    [[maybe_unused]] const u32 title_count = rp.Pop<u32>();
+    [[maybe_unused]] const u8 database = rp.Pop<u8>();
+    const auto buffer = rp.PopMappedBuffer();
 
     // Note: This function is basically a no-op for us since we don't use title.db or ticket.db
     // files to keep track of installed titles.
@@ -1138,7 +1172,7 @@ private:
 };
 
 ResultVal<std::unique_ptr<AMFileWrapper>> GetFileFromSession(
-    Kernel::SharedPtr<Kernel::ClientSession> file_session) {
+    std::shared_ptr<Kernel::ClientSession> file_session) {
     // Step up the chain from ClientSession->ServerSession and then
     // cast to File. For AM on 3DS, invalid handles actually hang the system.
 
@@ -1147,7 +1181,8 @@ ResultVal<std::unique_ptr<AMFileWrapper>> GetFileFromSession(
         return Kernel::ERR_INVALID_HANDLE;
     }
 
-    Kernel::SharedPtr<Kernel::ServerSession> server = file_session->parent->server;
+    std::shared_ptr<Kernel::ServerSession> server =
+        Kernel::SharedFrom(file_session->parent->server);
     if (server == nullptr) {
         LOG_WARNING(Service_AM, "File handle ServerSession disconnected!");
         return Kernel::ERR_SESSION_CLOSED_BY_REMOTE;
@@ -1177,7 +1212,7 @@ ResultVal<std::unique_ptr<AMFileWrapper>> GetFileFromSession(
 
 void Module::Interface::GetProgramInfoFromCia(Kernel::HLERequestContext& ctx) {
     IPC::RequestParser rp(ctx, 0x0408, 1, 2); // 0x04080042
-    auto media_type = static_cast<Service::FS::MediaType>(rp.Pop<u8>());
+    [[maybe_unused]] const auto media_type = static_cast<FS::MediaType>(rp.Pop<u8>());
     auto cia = rp.PopObject<Kernel::ClientSession>();
 
     auto file_res = GetFileFromSession(cia);
@@ -1195,7 +1230,7 @@ void Module::Interface::GetProgramInfoFromCia(Kernel::HLERequestContext& ctx) {
         return;
     }
 
-    FileSys::TitleMetadata tmd = container.GetTitleMetadata();
+    const FileSys::TitleMetadata& tmd = container.GetTitleMetadata();
     TitleInfo title_info = {};
     container.Print();
 
@@ -1280,7 +1315,7 @@ void Module::Interface::GetDependencyListFromCia(Kernel::HLERequestContext& ctx)
 
     IPC::RequestBuilder rb = rp.MakeBuilder(1, 2);
     rb.Push(RESULT_SUCCESS);
-    rb.PushStaticBuffer(buffer, 0);
+    rb.PushStaticBuffer(std::move(buffer), 0);
 }
 
 void Module::Interface::GetTransferSizeFromCia(Kernel::HLERequestContext& ctx) {
@@ -1333,7 +1368,7 @@ void Module::Interface::GetCoreVersionFromCia(Kernel::HLERequestContext& ctx) {
 
 void Module::Interface::GetRequiredSizeFromCia(Kernel::HLERequestContext& ctx) {
     IPC::RequestParser rp(ctx, 0x040D, 1, 2); // 0x040D0042
-    auto media_type = static_cast<Service::FS::MediaType>(rp.Pop<u8>());
+    [[maybe_unused]] const auto media_type = static_cast<FS::MediaType>(rp.Pop<u8>());
     auto cia = rp.PopObject<Kernel::ClientSession>();
 
     auto file_res = GetFileFromSession(cia);
@@ -1455,10 +1490,12 @@ void Module::Interface::GetMetaDataFromCia(Kernel::HLERequestContext& ctx) {
     rb.PushMappedBuffer(output_buffer);
 }
 
-Module::Module(Core::System& system) : system(system) {
+Module::Module(Core::System& system) : kernel(system.Kernel()) {
     ScanForAllTitles();
     system_updater_mutex = system.Kernel().CreateMutex(false, "AM::SystemUpdaterMutex");
 }
+
+Module::Module(Kernel::KernelSystem& kernel) : kernel(kernel) {}
 
 Module::~Module() = default;
 

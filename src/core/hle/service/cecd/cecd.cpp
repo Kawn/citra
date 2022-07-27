@@ -2,9 +2,12 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <boost/serialization/shared_ptr.hpp>
+#include <boost/serialization/unique_ptr.hpp>
 #include <cryptopp/base64.h>
 #include <cryptopp/hmac.h>
 #include <cryptopp/sha.h>
+#include "common/archives.h"
 #include "common/common_paths.h"
 #include "common/file_util.h"
 #include "common/logging/log.h"
@@ -21,9 +24,22 @@
 #include "core/hle/service/cecd/cecd_ndm.h"
 #include "core/hle/service/cecd/cecd_s.h"
 #include "core/hle/service/cecd/cecd_u.h"
+#include "core/hle/service/cfg/cfg.h"
 #include "fmt/format.h"
 
+SERVICE_CONSTRUCT_IMPL(Service::CECD::Module)
+SERIALIZE_EXPORT_IMPL(Service::CECD::Module)
+SERIALIZE_EXPORT_IMPL(Service::CECD::Module::SessionData)
+
 namespace Service::CECD {
+
+template <class Archive>
+void Module::serialize(Archive& ar, const unsigned int) {
+    ar& cecd_system_save_data_archive;
+    ar& cecinfo_event;
+    ar& change_state_event;
+}
+SERIALIZE_IMPL(Module)
 
 using CecDataPathType = Module::CecDataPathType;
 using CecOpenMode = Module::CecOpenMode;
@@ -92,7 +108,7 @@ void Module::Interface::Open(Kernel::HLERequestContext& ctx) {
         } else {
             session_data->file = std::move(file_result).Unwrap();
             rb.Push(RESULT_SUCCESS);
-            rb.Push<u32>(session_data->file->GetSize()); // Return file size
+            rb.Push<u32>(static_cast<u32>(session_data->file->GetSize())); // Return file size
         }
 
         if (path_type == CecDataPathType::MboxProgramId) {
@@ -108,9 +124,8 @@ void Module::Interface::Open(Kernel::HLERequestContext& ctx) {
     LOG_DEBUG(Service_CECD,
               "called, ncch_program_id={:#010x}, path_type={:#04x}, path={}, "
               "open_mode: raw={:#x}, unknown={}, read={}, write={}, create={}, check={}",
-              ncch_program_id, static_cast<u32>(path_type), path.AsString(), open_mode.raw,
-              open_mode.unknown, open_mode.read, open_mode.write, open_mode.create,
-              open_mode.check);
+              ncch_program_id, path_type, path.AsString(), open_mode.raw, open_mode.unknown,
+              open_mode.read, open_mode.write, open_mode.create, open_mode.check);
 }
 
 void Module::Interface::Read(Kernel::HLERequestContext& ctx) {
@@ -122,7 +137,7 @@ void Module::Interface::Read(Kernel::HLERequestContext& ctx) {
     LOG_DEBUG(Service_CECD,
               "SessionData: ncch_program_id={:#010x}, data_path_type={:#04x}, "
               "path={}, open_mode: raw={:#x}, unknown={}, read={}, write={}, create={}, check={}",
-              session_data->ncch_program_id, static_cast<u32>(session_data->data_path_type),
+              session_data->ncch_program_id, session_data->data_path_type,
               session_data->path.AsString(), session_data->open_mode.raw,
               session_data->open_mode.unknown, session_data->open_mode.read,
               session_data->open_mode.write, session_data->open_mode.create,
@@ -140,8 +155,8 @@ void Module::Interface::Read(Kernel::HLERequestContext& ctx) {
         break;
     default: // If not directory, then it is a file
         std::vector<u8> buffer(write_buffer_size);
-        const u32 bytes_read =
-            session_data->file->Read(0, write_buffer_size, buffer.data()).Unwrap();
+        const u32 bytes_read = static_cast<u32>(
+            session_data->file->Read(0, write_buffer_size, buffer.data()).Unwrap());
 
         write_buffer.Write(buffer.data(), 0, write_buffer_size);
         session_data->file->Close();
@@ -183,7 +198,8 @@ void Module::Interface::ReadMessage(Kernel::HLERequestContext& ctx) {
         auto message = std::move(message_result).Unwrap();
         std::vector<u8> buffer(buffer_size);
 
-        const u32 bytes_read = message->Read(0, buffer_size, buffer.data()).Unwrap();
+        const u32 bytes_read =
+            static_cast<u32>(message->Read(0, buffer_size, buffer.data()).Unwrap());
         write_buffer.Write(buffer.data(), 0, buffer_size);
         message->Close();
 
@@ -252,7 +268,8 @@ void Module::Interface::ReadMessageWithHMAC(Kernel::HLERequestContext& ctx) {
         auto message = std::move(message_result).Unwrap();
         std::vector<u8> buffer(buffer_size);
 
-        const u32 bytes_read = message->Read(0, buffer_size, buffer.data()).Unwrap();
+        const u32 bytes_read =
+            static_cast<u32>(message->Read(0, buffer_size, buffer.data()).Unwrap());
         write_buffer.Write(buffer.data(), 0, buffer_size);
         message->Close();
 
@@ -325,7 +342,7 @@ void Module::Interface::Write(Kernel::HLERequestContext& ctx) {
     LOG_DEBUG(Service_CECD,
               "SessionData: ncch_program_id={:#010x}, data_path_type={:#04x}, "
               "path={}, open_mode: raw={:#x}, unknown={}, read={}, write={}, create={}, check={}",
-              session_data->ncch_program_id, static_cast<u32>(session_data->data_path_type),
+              session_data->ncch_program_id, session_data->data_path_type,
               session_data->path.AsString(), session_data->open_mode.raw,
               session_data->open_mode.unknown, session_data->open_mode.read,
               session_data->open_mode.write, session_data->open_mode.create,
@@ -353,8 +370,8 @@ void Module::Interface::Write(Kernel::HLERequestContext& ctx) {
                                      buffer);
         }
 
-        const u32 bytes_written =
-            session_data->file->Write(0, buffer.size(), true, buffer.data()).Unwrap();
+        [[maybe_unused]] const u32 bytes_written = static_cast<u32>(
+            session_data->file->Write(0, buffer.size(), true, buffer.data()).Unwrap());
         session_data->file->Close();
 
         rb.Push(RESULT_SUCCESS);
@@ -415,7 +432,8 @@ void Module::Interface::WriteMessage(Kernel::HLERequestContext& ctx) {
                   msg_header.sender_id, msg_header.sender_id2, msg_header.send_count,
                   msg_header.forward_count, msg_header.user_data);
 
-        const u32 bytes_written = message->Write(0, buffer_size, true, buffer.data()).Unwrap();
+        [[maybe_unused]] const u32 bytes_written =
+            static_cast<u32>(message->Write(0, buffer_size, true, buffer.data()).Unwrap());
         message->Close();
 
         rb.Push(RESULT_SUCCESS);
@@ -501,7 +519,8 @@ void Module::Interface::WriteMessageWithHMAC(Kernel::HLERequestContext& ctx) {
         hmac.CalculateDigest(hmac_digest.data(), message_body.data(), msg_header.body_size);
         std::memcpy(buffer.data() + hmac_offset, hmac_digest.data(), hmac_size);
 
-        const u32 bytes_written = message->Write(0, buffer_size, true, buffer.data()).Unwrap();
+        [[maybe_unused]] const u32 bytes_written =
+            static_cast<u32>(message->Write(0, buffer_size, true, buffer.data()).Unwrap());
         message->Close();
 
         rb.Push(RESULT_SUCCESS);
@@ -561,8 +580,7 @@ void Module::Interface::Delete(Kernel::HLERequestContext& ctx) {
     LOG_DEBUG(Service_CECD,
               "called, ncch_program_id={:#010x}, path_type={:#04x}, path={}, "
               "is_outbox={}, message_id_size={:#x}",
-              ncch_program_id, static_cast<u32>(path_type), path.AsString(), is_outbox,
-              message_id_size);
+              ncch_program_id, path_type, path.AsString(), is_outbox, message_id_size);
 }
 
 void Module::Interface::SetData(Kernel::HLERequestContext& ctx) {
@@ -612,10 +630,12 @@ void Module::Interface::ReadData(Kernel::HLERequestContext& ctx) {
     IPC::RequestBuilder rb = rp.MakeBuilder(1, 4);
     std::vector<u8> buffer;
     switch (info_type) {
-    case CecSystemInfoType::EulaVersion: // TODO: Read config Eula version
-        buffer = {0xFF, 0xFF};
-        dest_buffer.Write(buffer.data(), 0, buffer.size());
+    case CecSystemInfoType::EulaVersion: {
+        auto cfg = Service::CFG::GetModule(cecd->system);
+        Service::CFG::EULAVersion version = cfg->GetEULAVersion();
+        dest_buffer.Write(&version, 0, sizeof(version));
         break;
+    }
     case CecSystemInfoType::Eula:
         buffer = {0x01}; // Eula agreed
         dest_buffer.Write(buffer.data(), 0, buffer.size());
@@ -625,7 +645,7 @@ void Module::Interface::ReadData(Kernel::HLERequestContext& ctx) {
         dest_buffer.Write(buffer.data(), 0, buffer.size());
         break;
     default:
-        LOG_ERROR(Service_CECD, "Unknown system info type={:#x}", static_cast<u32>(info_type));
+        LOG_ERROR(Service_CECD, "Unknown system info type={:#x}", info_type);
     }
 
     rb.Push(RESULT_SUCCESS);
@@ -634,7 +654,7 @@ void Module::Interface::ReadData(Kernel::HLERequestContext& ctx) {
 
     LOG_DEBUG(Service_CECD,
               "called, dest_buffer_size={:#x}, info_type={:#x}, param_buffer_size={:#x}",
-              dest_buffer_size, static_cast<u32>(info_type), param_buffer_size);
+              dest_buffer_size, info_type, param_buffer_size);
 }
 
 void Module::Interface::Start(Kernel::HLERequestContext& ctx) {
@@ -741,7 +761,8 @@ void Module::Interface::OpenAndWrite(Kernel::HLERequestContext& ctx) {
                 cecd->CheckAndUpdateFile(path_type, ncch_program_id, buffer);
             }
 
-            const u32 bytes_written = file->Write(0, buffer.size(), true, buffer.data()).Unwrap();
+            [[maybe_unused]] const u32 bytes_written =
+                static_cast<u32>(file->Write(0, buffer.size(), true, buffer.data()).Unwrap());
             file->Close();
 
             rb.Push(RESULT_SUCCESS);
@@ -755,8 +776,8 @@ void Module::Interface::OpenAndWrite(Kernel::HLERequestContext& ctx) {
     LOG_DEBUG(Service_CECD,
               "called, ncch_program_id={:#010x}, path_type={:#04x}, path={}, buffer_size={:#x} "
               "open_mode: raw={:#x}, unknown={}, read={}, write={}, create={}, check={}",
-              ncch_program_id, static_cast<u32>(path_type), path.AsString(), buffer_size,
-              open_mode.raw, open_mode.unknown, open_mode.read, open_mode.write, open_mode.create,
+              ncch_program_id, path_type, path.AsString(), buffer_size, open_mode.raw,
+              open_mode.unknown, open_mode.read, open_mode.write, open_mode.create,
               open_mode.check);
 }
 
@@ -790,7 +811,8 @@ void Module::Interface::OpenAndRead(Kernel::HLERequestContext& ctx) {
             auto file = std::move(file_result).Unwrap();
             std::vector<u8> buffer(buffer_size);
 
-            const u32 bytes_read = file->Read(0, buffer_size, buffer.data()).Unwrap();
+            const u32 bytes_read =
+                static_cast<u32>(file->Read(0, buffer_size, buffer.data()).Unwrap());
             write_buffer.Write(buffer.data(), 0, buffer_size);
             file->Close();
 
@@ -807,8 +829,8 @@ void Module::Interface::OpenAndRead(Kernel::HLERequestContext& ctx) {
     LOG_DEBUG(Service_CECD,
               "called, ncch_program_id={:#010x}, path_type={:#04x}, path={}, buffer_size={:#x} "
               "open_mode: raw={:#x}, unknown={}, read={}, write={}, create={}, check={}",
-              ncch_program_id, static_cast<u32>(path_type), path.AsString(), buffer_size,
-              open_mode.raw, open_mode.unknown, open_mode.read, open_mode.write, open_mode.create,
+              ncch_program_id, path_type, path.AsString(), buffer_size, open_mode.raw,
+              open_mode.unknown, open_mode.read, open_mode.write, open_mode.create,
               open_mode.check);
 }
 
@@ -921,7 +943,7 @@ void Module::CheckAndUpdateFile(const CecDataPathType path_type, const u32 ncch_
     constexpr u32 max_num_boxes = 24;
     constexpr u32 name_size = 16;      // fixed size 16 characters long
     constexpr u32 valid_name_size = 8; // 8 characters are valid, the rest are null
-    const u32 file_size = file_buffer.size();
+    const u32 file_size = static_cast<u32>(file_buffer.size());
 
     switch (path_type) {
     case CecDataPathType::MboxList: {
@@ -1005,7 +1027,7 @@ void Module::CheckAndUpdateFile(const CecDataPathType path_type, const u32 ncch_
                 std::u16string u16_filename;
 
                 // Loop through entries but don't add mboxlist____ to itself.
-                for (auto i = 0; i < entry_count; i++) {
+                for (u32 i = 0; i < entry_count; i++) {
                     u16_filename = std::u16string(entries[i].filename);
                     file_name = Common::UTF16ToUTF8(u16_filename);
 
@@ -1196,7 +1218,7 @@ void Module::CheckAndUpdateFile(const CecDataPathType path_type, const u32 ncch_
         std::string file_name;
         std::u16string u16_filename;
 
-        for (auto i = 0; i < entry_count; i++) {
+        for (u32 i = 0; i < entry_count; i++) {
             u16_filename = std::u16string(entries[i].filename);
             file_name = Common::UTF16ToUTF8(u16_filename);
 
@@ -1214,7 +1236,7 @@ void Module::CheckAndUpdateFile(const CecDataPathType path_type, const u32 ncch_
                 auto message_result = cecd_system_save_data_archive->OpenFile(message_path, mode);
 
                 auto message = std::move(message_result).Unwrap();
-                const u32 message_size = message->GetSize();
+                const u32 message_size = static_cast<u32>(message->GetSize());
                 std::vector<u8> buffer(message_size);
 
                 message->Read(0, message_size, buffer.data()).Unwrap();
@@ -1288,7 +1310,7 @@ void Module::CheckAndUpdateFile(const CecDataPathType path_type, const u32 ncch_
         std::string file_name;
         std::u16string u16_filename;
 
-        for (auto i = 0; i < entry_count; i++) {
+        for (u32 i = 0; i < entry_count; i++) {
             u16_filename = std::u16string(entries[i].filename);
             file_name = Common::UTF16ToUTF8(u16_filename);
 
@@ -1304,7 +1326,7 @@ void Module::CheckAndUpdateFile(const CecDataPathType path_type, const u32 ncch_
                 auto message_result = cecd_system_save_data_archive->OpenFile(message_path, mode);
 
                 auto message = std::move(message_result).Unwrap();
-                const u32 message_size = message->GetSize();
+                const u32 message_size = static_cast<u32>(message->GetSize());
                 std::vector<u8> buffer(message_size);
 
                 message->Read(0, message_size, buffer.data()).Unwrap();
@@ -1337,7 +1359,8 @@ void Module::CheckAndUpdateFile(const CecDataPathType path_type, const u32 ncch_
     case CecDataPathType::MboxData:
     case CecDataPathType::MboxIcon:
     case CecDataPathType::MboxTitle:
-    default: {}
+    default: {
+    }
     }
 }
 
@@ -1357,7 +1380,7 @@ Module::Module(Core::System& system) : system(system) {
     change_state_event =
         system.Kernel().CreateEvent(Kernel::ResetType::OneShot, "CECD::change_state_event");
 
-    std::string nand_directory = FileUtil::GetUserPath(FileUtil::UserPath::NANDDir);
+    const std::string& nand_directory = FileUtil::GetUserPath(FileUtil::UserPath::NANDDir);
     FileSys::ArchiveFactory_SystemSaveData systemsavedata_factory(nand_directory);
 
     // Open the SystemSaveData archive 0x00010026

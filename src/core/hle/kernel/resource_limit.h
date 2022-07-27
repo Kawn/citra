@@ -5,6 +5,11 @@
 #pragma once
 
 #include <array>
+#include <memory>
+#include <boost/serialization/array.hpp>
+#include <boost/serialization/base_object.hpp>
+#include <boost/serialization/shared_ptr.hpp>
+#include <boost/serialization/string.hpp>
 #include "common/common_types.h"
 #include "core/hle/kernel/object.h"
 
@@ -32,10 +37,14 @@ enum ResourceTypes {
 
 class ResourceLimit final : public Object {
 public:
+    explicit ResourceLimit(KernelSystem& kernel);
+    ~ResourceLimit() override;
+
     /**
      * Creates a resource limit object.
      */
-    static SharedPtr<ResourceLimit> Create(KernelSystem& kernel, std::string name = "Unknown");
+    static std::shared_ptr<ResourceLimit> Create(KernelSystem& kernel,
+                                                 std::string name = "Unknown");
 
     std::string GetTypeName() const override {
         return "ResourceLimit";
@@ -44,7 +53,7 @@ public:
         return name;
     }
 
-    static const HandleType HANDLE_TYPE = HandleType::ResourceLimit;
+    static constexpr HandleType HANDLE_TYPE = HandleType::ResourceLimit;
     HandleType GetHandleType() const override {
         return HANDLE_TYPE;
     }
@@ -107,8 +116,33 @@ public:
     s32 current_cpu_time = 0;
 
 private:
-    explicit ResourceLimit(KernelSystem& kernel);
-    ~ResourceLimit() override;
+    friend class boost::serialization::access;
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int file_version) {
+        ar& boost::serialization::base_object<Object>(*this);
+        // NB most of these aren't used at all currently, but we're adding them here for forwards
+        // compatibility
+        ar& name;
+        ar& max_priority;
+        ar& max_commit;
+        ar& max_threads;
+        ar& max_events;
+        ar& max_mutexes;
+        ar& max_semaphores;
+        ar& max_timers;
+        ar& max_shared_mems;
+        ar& max_address_arbiters;
+        ar& max_cpu_time;
+        ar& current_commit;
+        ar& current_threads;
+        ar& current_events;
+        ar& current_mutexes;
+        ar& current_semaphores;
+        ar& current_timers;
+        ar& current_shared_mems;
+        ar& current_address_arbiters;
+        ar& current_cpu_time;
+    }
 };
 
 class ResourceLimitList {
@@ -121,10 +155,19 @@ public:
      * @param category The resource limit category
      * @returns The resource limit associated with the category
      */
-    SharedPtr<ResourceLimit> GetForCategory(ResourceLimitCategory category);
+    std::shared_ptr<ResourceLimit> GetForCategory(ResourceLimitCategory category);
 
 private:
-    std::array<SharedPtr<ResourceLimit>, 4> resource_limits;
+    std::array<std::shared_ptr<ResourceLimit>, 4> resource_limits;
+
+    friend class boost::serialization::access;
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int file_version) {
+        ar& resource_limits;
+    }
 };
 
 } // namespace Kernel
+
+BOOST_CLASS_EXPORT_KEY(Kernel::ResourceLimit)
+CONSTRUCT_KERNEL_OBJECT(Kernel::ResourceLimit)

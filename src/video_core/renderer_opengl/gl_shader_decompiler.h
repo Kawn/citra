@@ -2,6 +2,8 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#pragma once
+
 #include <array>
 #include <functional>
 #include <optional>
@@ -11,16 +13,17 @@
 
 namespace OpenGL::ShaderDecompiler {
 
-using ProgramCode = std::array<u32, Pica::Shader::MAX_PROGRAM_CODE_LENGTH>;
-using SwizzleData = std::array<u32, Pica::Shader::MAX_SWIZZLE_DATA_LENGTH>;
 using RegGetter = std::function<std::string(u32)>;
+
+struct ProgramResult {
+    std::string code;
+};
 
 std::string GetCommonDeclarations();
 
-std::optional<std::string> DecompileProgram(const ProgramCode& program_code,
-                                            const SwizzleData& swizzle_data, u32 main_offset,
-                                            const RegGetter& inputreg_getter,
-                                            const RegGetter& outputreg_getter, bool sanitize_mul,
-                                            bool is_gs);
+std::optional<ProgramResult> DecompileProgram(const Pica::Shader::ProgramCode& program_code,
+                                              const Pica::Shader::SwizzleData& swizzle_data,
+                                              u32 main_offset, const RegGetter& inputreg_getter,
+                                              const RegGetter& outputreg_getter, bool sanitize_mul);
 
 } // namespace OpenGL::ShaderDecompiler

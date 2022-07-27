@@ -102,40 +102,40 @@ const JitFunction instr_table[64] = {
 // purposes, as documented below:
 
 /// Pointer to the uniform memory
-static const Reg64 UNIFORMS = r9;
+constexpr Reg64 UNIFORMS = r9;
 /// The two 32-bit VS address offset registers set by the MOVA instruction
-static const Reg64 ADDROFFS_REG_0 = r10;
-static const Reg64 ADDROFFS_REG_1 = r11;
+constexpr Reg64 ADDROFFS_REG_0 = r10;
+constexpr Reg64 ADDROFFS_REG_1 = r11;
 /// VS loop count register (Multiplied by 16)
-static const Reg32 LOOPCOUNT_REG = r12d;
+constexpr Reg32 LOOPCOUNT_REG = r12d;
 /// Current VS loop iteration number (we could probably use LOOPCOUNT_REG, but this quicker)
-static const Reg32 LOOPCOUNT = esi;
+constexpr Reg32 LOOPCOUNT = esi;
 /// Number to increment LOOPCOUNT_REG by on each loop iteration (Multiplied by 16)
-static const Reg32 LOOPINC = edi;
+constexpr Reg32 LOOPINC = edi;
 /// Result of the previous CMP instruction for the X-component comparison
-static const Reg64 COND0 = r13;
+constexpr Reg64 COND0 = r13;
 /// Result of the previous CMP instruction for the Y-component comparison
-static const Reg64 COND1 = r14;
+constexpr Reg64 COND1 = r14;
 /// Pointer to the UnitState instance for the current VS unit
-static const Reg64 STATE = r15;
+constexpr Reg64 STATE = r15;
 /// SIMD scratch register
-static const Xmm SCRATCH = xmm0;
+constexpr Xmm SCRATCH = xmm0;
 /// Loaded with the first swizzled source register, otherwise can be used as a scratch register
-static const Xmm SRC1 = xmm1;
+constexpr Xmm SRC1 = xmm1;
 /// Loaded with the second swizzled source register, otherwise can be used as a scratch register
-static const Xmm SRC2 = xmm2;
+constexpr Xmm SRC2 = xmm2;
 /// Loaded with the third swizzled source register, otherwise can be used as a scratch register
-static const Xmm SRC3 = xmm3;
+constexpr Xmm SRC3 = xmm3;
 /// Additional scratch register
-static const Xmm SCRATCH2 = xmm4;
+constexpr Xmm SCRATCH2 = xmm4;
 /// Constant vector of [1.0f, 1.0f, 1.0f, 1.0f], used to efficiently set a vector to one
-static const Xmm ONE = xmm14;
+constexpr Xmm ONE = xmm14;
 /// Constant vector of [-0.f, -0.f, -0.f, -0.f], used to efficiently negate a vector with XOR
-static const Xmm NEGBIT = xmm15;
+constexpr Xmm NEGBIT = xmm15;
 
 // State registers that must not be modified by external functions calls
 // Scratch registers, e.g., SRC1 and SCRATCH, have to be saved on the side if needed
-static const BitSet32 persistent_regs = BuildRegSet({
+static const std::bitset<32> persistent_regs = BuildRegSet({
     // Pointers to register blocks
     UNIFORMS,
     STATE,
@@ -164,8 +164,10 @@ static void LogCritical(const char* msg) {
 
 void JitShader::Compile_Assert(bool condition, const char* msg) {
     if (!condition) {
+        ABI_PushRegistersAndAdjustStack(*this, PersistentCallerSavedRegs(), 0);
         mov(ABI_PARAM1, reinterpret_cast<std::size_t>(msg));
         CallFarFunction(*this, LogCritical);
+        ABI_PopRegistersAndAdjustStack(*this, PersistentCallerSavedRegs(), 0);
     }
 }
 
@@ -356,7 +358,7 @@ void JitShader::Compile_UniformCondition(Instruction instr) {
     cmp(byte[UNIFORMS + offset], 0);
 }
 
-BitSet32 JitShader::PersistentCallerSavedRegs() {
+std::bitset<32> JitShader::PersistentCallerSavedRegs() {
     return persistent_regs & ABI_ALL_CALLER_SAVED;
 }
 
@@ -595,11 +597,11 @@ void JitShader::Compile_END(Instruction instr) {
 }
 
 void JitShader::Compile_BREAKC(Instruction instr) {
-    Compile_Assert(looping, "BREAKC must be inside a LOOP");
-    if (looping) {
+    Compile_Assert(loop_depth, "BREAKC must be inside a LOOP");
+    if (loop_depth) {
         Compile_EvaluateCondition(instr);
-        ASSERT(loop_break_label);
-        jnz(*loop_break_label);
+        ASSERT(!loop_break_labels.empty());
+        jnz(loop_break_labels.back(), T_NEAR);
     }
 }
 
@@ -725,9 +727,11 @@ void JitShader::Compile_IF(Instruction instr) {
 void JitShader::Compile_LOOP(Instruction instr) {
     Compile_Assert(instr.flow_control.dest_offset >= program_counter,
                    "Backwards loops not supported");
-    Compile_Assert(!looping, "Nested loops not supported");
-
-    looping = true;
+    Compile_Assert(loop_depth < 1, "Nested loops may not be supported");
+    if (loop_depth++) {
+        const auto loop_save_regs = BuildRegSet({LOOPCOUNT_REG, LOOPINC, LOOPCOUNT});
+        ABI_PushRegistersAndAdjustStack(*this, loop_save_regs, 0);
+    }
 
     // This decodes the fields from the integer uniform at index instr.flow_control.int_uniform_id.
     // The Y (LOOPCOUNT_REG) and Z (LOOPINC) component are kept multiplied by 16 (Left shifted by
@@ -746,16 +750,20 @@ void JitShader::Compile_LOOP(Instruction instr) {
     Label l_loop_start;
     L(l_loop_start);
 
-    loop_break_label = Xbyak::Label();
+    loop_break_labels.emplace_back(Xbyak::Label());
     Compile_Block(instr.flow_control.dest_offset + 1);
 
     add(LOOPCOUNT_REG, LOOPINC); // Increment LOOPCOUNT_REG by Z-component
     sub(LOOPCOUNT, 1);           // Increment loop count by 1
     jnz(l_loop_start);           // Loop if not equal
-    L(*loop_break_label);
-    loop_break_label.reset();
 
-    looping = false;
+    L(loop_break_labels.back());
+    loop_break_labels.pop_back();
+
+    if (--loop_depth) {
+        const auto loop_save_regs = BuildRegSet({LOOPCOUNT_REG, LOOPINC, LOOPCOUNT});
+        ABI_PopRegistersAndAdjustStack(*this, loop_save_regs, 0);
+    }
 }
 
 void JitShader::Compile_JMP(Instruction instr) {
@@ -892,7 +900,7 @@ void JitShader::Compile(const std::array<u32, MAX_PROGRAM_CODE_LENGTH>* program_
     // Reset flow control state
     program = (CompiledShader*)getCurr();
     program_counter = 0;
-    looping = false;
+    loop_depth = 0;
     instruction_labels.fill(Xbyak::Label());
 
     // Find all `CALL` instructions and identify return locations

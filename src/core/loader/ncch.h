@@ -33,13 +33,17 @@ public:
         return IdentifyType(file);
     }
 
-    ResultStatus Load(Kernel::SharedPtr<Kernel::Process>& process) override;
+    ResultStatus Load(std::shared_ptr<Kernel::Process>& process) override;
 
     /**
      * Loads the Exheader and returns the system mode for this application.
      * @returns A pair with the optional system mode, and and the status.
      */
     std::pair<std::optional<u32>, ResultStatus> LoadKernelSystemMode() override;
+
+    std::pair<std::optional<u8>, ResultStatus> LoadKernelN3dsMode() override;
+
+    ResultStatus IsExecutable(bool& out_executable) override;
 
     ResultStatus ReadCode(std::vector<u8>& buffer) override;
 
@@ -57,6 +61,10 @@ public:
 
     ResultStatus ReadUpdateRomFS(std::shared_ptr<FileSys::RomFSReader>& romfs_file) override;
 
+    ResultStatus DumpRomFS(const std::string& target_path) override;
+
+    ResultStatus DumpUpdateRomFS(const std::string& target_path) override;
+
     ResultStatus ReadTitle(std::string& title) override;
 
 private:
@@ -65,7 +73,7 @@ private:
      * @param process The newly created process
      * @return ResultStatus result of function
      */
-    ResultStatus LoadExec(Kernel::SharedPtr<Kernel::Process>& process);
+    ResultStatus LoadExec(std::shared_ptr<Kernel::Process>& process);
 
     /// Reads the region lockout info in the SMDH and send it to CFG service
     void ParseRegionLockoutInfo();

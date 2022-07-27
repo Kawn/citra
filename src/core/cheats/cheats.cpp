@@ -11,13 +11,20 @@
 #include "core/core.h"
 #include "core/core_timing.h"
 #include "core/hle/kernel/process.h"
+#include "core/hw/gpu.h"
 
 namespace Cheats {
 
-constexpr u64 run_interval_ticks = BASE_CLOCK_RATE_ARM11 / 60;
+// Luma3DS uses this interval for applying cheats, so to keep consistent behavior
+// we use the same value
+constexpr u64 run_interval_ticks = 50'000'000;
 
 CheatEngine::CheatEngine(Core::System& system_) : system(system_) {
     LoadCheatFile();
+    Connect();
+}
+
+void CheatEngine::Connect() {
     event = system.CoreTiming().RegisterEvent(
         "CheatCore::run_event",
         [this](u64 thread_id, s64 cycle_late) { RunCallback(thread_id, cycle_late); });
@@ -95,7 +102,7 @@ void CheatEngine::LoadCheatFile() {
     }
 }
 
-void CheatEngine::RunCallback([[maybe_unused]] u64 userdata, int cycles_late) {
+void CheatEngine::RunCallback([[maybe_unused]] u64 userdata, s64 cycles_late) {
     {
         std::shared_lock<std::shared_mutex> lock(cheats_list_mutex);
         for (auto& cheat : cheats_list) {

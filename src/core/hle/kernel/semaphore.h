@@ -5,6 +5,9 @@
 #pragma once
 
 #include <string>
+#include <boost/serialization/base_object.hpp>
+#include <boost/serialization/export.hpp>
+#include <boost/serialization/string.hpp>
 #include <queue>
 #include "common/common_types.h"
 #include "core/hle/kernel/object.h"
@@ -15,6 +18,9 @@ namespace Kernel {
 
 class Semaphore final : public WaitObject {
 public:
+    explicit Semaphore(KernelSystem& kernel);
+    ~Semaphore() override;
+
     std::string GetTypeName() const override {
         return "Semaphore";
     }
@@ -22,7 +28,7 @@ public:
         return name;
     }
 
-    static const HandleType HANDLE_TYPE = HandleType::Semaphore;
+    static constexpr HandleType HANDLE_TYPE = HandleType::Semaphore;
     HandleType GetHandleType() const override {
         return HANDLE_TYPE;
     }
@@ -31,7 +37,7 @@ public:
     s32 available_count; ///< Number of free slots left in the semaphore
     std::string name;    ///< Name of semaphore (optional)
 
-    bool ShouldWait(Thread* thread) const override;
+    bool ShouldWait(const Thread* thread) const override;
     void Acquire(Thread* thread) override;
 
     /**
@@ -42,10 +48,17 @@ public:
     ResultVal<s32> Release(s32 release_count);
 
 private:
-    explicit Semaphore(KernelSystem& kernel);
-    ~Semaphore() override;
-
-    friend class KernelSystem;
+    friend class boost::serialization::access;
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int file_version) {
+        ar& boost::serialization::base_object<WaitObject>(*this);
+        ar& max_count;
+        ar& available_count;
+        ar& name;
+    }
 };
 
 } // namespace Kernel
+
+BOOST_CLASS_EXPORT_KEY(Kernel::Semaphore)
+CONSTRUCT_KERNEL_OBJECT(Kernel::Semaphore)

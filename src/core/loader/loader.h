@@ -5,7 +5,6 @@
 #pragma once
 
 #include <algorithm>
-#include <initializer_list>
 #include <memory>
 #include <optional>
 #include <string>
@@ -99,17 +98,36 @@ public:
      * @param process The newly created process.
      * @return The status result of the operation.
      */
-    virtual ResultStatus Load(Kernel::SharedPtr<Kernel::Process>& process) = 0;
+    virtual ResultStatus Load(std::shared_ptr<Kernel::Process>& process) = 0;
 
     /**
      * Loads the system mode that this application needs.
      * This function defaults to 2 (96MB allocated to the application) if it can't read the
      * information.
-     * @returns A pair with the optional system mode, and and the status.
+     * @returns A pair with the optional system mode, and the status.
      */
     virtual std::pair<std::optional<u32>, ResultStatus> LoadKernelSystemMode() {
         // 96MB allocated to the application.
         return std::make_pair(2, ResultStatus::Success);
+    }
+
+    /**
+     * Loads the N3ds mode that this application uses.
+     * It defaults to 0 (O3DS default) if it can't read the information.
+     * @returns A pair with the optional N3ds mode, and the status.
+     */
+    virtual std::pair<std::optional<u8>, ResultStatus> LoadKernelN3dsMode() {
+        return std::make_pair(0, ResultStatus::Success);
+    }
+
+    /**
+     * Get whether this application is executable.
+     * @param out_executable Reference to store the executable flag into.
+     * @return ResultStatus result of function
+     */
+    virtual ResultStatus IsExecutable(bool& out_executable) {
+        out_executable = true;
+        return ResultStatus::Success;
     }
 
     /**
@@ -177,12 +195,30 @@ public:
     }
 
     /**
+     * Dump the RomFS of the applciation
+     * @param target_path The target path to dump to
+     * @return ResultStatus result of function
+     */
+    virtual ResultStatus DumpRomFS(const std::string& target_path) {
+        return ResultStatus::ErrorNotImplemented;
+    }
+
+    /**
      * Get the update RomFS of the application
      * Since the RomFS can be huge, we return a file reference instead of copying to a buffer
      * @param romfs_file The file containing the RomFS
      * @return ResultStatus result of function
      */
     virtual ResultStatus ReadUpdateRomFS(std::shared_ptr<FileSys::RomFSReader>& romfs_file) {
+        return ResultStatus::ErrorNotImplemented;
+    }
+
+    /**
+     * Dump the update RomFS of the applciation
+     * @param target_path The target path to dump to
+     * @return ResultStatus result of function
+     */
+    virtual ResultStatus DumpUpdateRomFS(const std::string& target_path) {
         return ResultStatus::ErrorNotImplemented;
     }
 
@@ -199,12 +235,6 @@ protected:
     FileUtil::IOFile file;
     bool is_loaded = false;
 };
-
-/**
- * Common address mappings found in most games, used for binary formats that don't have this
- * information.
- */
-extern const std::initializer_list<Kernel::AddressMapping> default_address_mappings;
 
 /**
  * Identifies a bootable file and return a suitable loader

@@ -2,9 +2,12 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include "common/archives.h"
 #include "core/core.h"
 #include "core/hle/ipc_helpers.h"
 #include "core/hle/service/ndm/ndm_u.h"
+
+SERIALIZE_EXPORT_IMPL(Service::NDM::NDM_U)
 
 namespace Service::NDM {
 
@@ -15,8 +18,7 @@ void NDM_U::EnterExclusiveState(Kernel::HLERequestContext& ctx) {
 
     IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
     rb.Push(RESULT_SUCCESS);
-    LOG_WARNING(Service_NDM, "(STUBBED) exclusive_state=0x{:08X}",
-                static_cast<u32>(exclusive_state));
+    LOG_WARNING(Service_NDM, "(STUBBED) exclusive_state=0x{:08X}", exclusive_state);
 }
 
 void NDM_U::LeaveExclusiveState(Kernel::HLERequestContext& ctx) {

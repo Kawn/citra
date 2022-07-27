@@ -1,7 +1,5 @@
 add_library(core STATIC
     3ds.h
-    announce_multiplayer_session.cpp
-    announce_multiplayer_session.h
     arm/arm_interface.h
     arm/dyncom/arm_dyncom.cpp
     arm/dyncom/arm_dyncom.h
@@ -36,6 +34,10 @@ add_library(core STATIC
     core.h
     core_timing.cpp
     core_timing.h
+    custom_tex_cache.cpp
+    custom_tex_cache.h
+    dumping/backend.cpp
+    dumping/backend.h
     file_sys/archive_backend.cpp
     file_sys/archive_backend.h
     file_sys/archive_extsavedata.cpp
@@ -68,8 +70,12 @@ add_library(core STATIC
     file_sys/delay_generator.h
     file_sys/ivfc_archive.cpp
     file_sys/ivfc_archive.h
+    file_sys/layered_fs.cpp
+    file_sys/layered_fs.h
     file_sys/ncch_container.cpp
     file_sys/ncch_container.h
+    file_sys/patch.cpp
+    file_sys/patch.h
     file_sys/path_parser.cpp
     file_sys/path_parser.h
     file_sys/romfs_reader.cpp
@@ -84,6 +90,8 @@ add_library(core STATIC
     file_sys/title_metadata.h
     frontend/applets/default_applets.cpp
     frontend/applets/default_applets.h
+    frontend/applets/mii_selector.cpp
+    frontend/applets/mii_selector.h
     frontend/applets/swkbd.cpp
     frontend/applets/swkbd.h
     frontend/camera/blank_camera.cpp
@@ -96,7 +104,12 @@ add_library(core STATIC
     frontend/emu_window.h
     frontend/framebuffer_layout.cpp
     frontend/framebuffer_layout.h
+    frontend/image_interface.h
     frontend/input.h
+    frontend/mic.cpp
+    frontend/mic.h
+    frontend/scope_acquire_context.cpp
+    frontend/scope_acquire_context.h
     gdbstub/gdbstub.cpp
     gdbstub/gdbstub.h
     hle/applets/applet.cpp
@@ -128,6 +141,8 @@ add_library(core STATIC
     hle/kernel/hle_ipc.h
     hle/kernel/ipc.cpp
     hle/kernel/ipc.h
+    hle/kernel/ipc_debugger/recorder.cpp
+    hle/kernel/ipc_debugger/recorder.h
     hle/kernel/kernel.cpp
     hle/kernel/kernel.h
     hle/kernel/memory.cpp
@@ -147,6 +162,7 @@ add_library(core STATIC
     hle/kernel/server_session.cpp
     hle/kernel/server_session.h
     hle/kernel/session.h
+    hle/kernel/session.cpp
     hle/kernel/shared_memory.cpp
     hle/kernel/shared_memory.h
     hle/kernel/shared_page.cpp
@@ -199,6 +215,10 @@ add_library(core STATIC
     hle/service/apt/apt_s.h
     hle/service/apt/apt_u.cpp
     hle/service/apt/apt_u.h
+    hle/service/apt/ns.cpp
+    hle/service/apt/ns.h
+    hle/service/apt/ns_s.cpp
+    hle/service/apt/ns_s.h
     hle/service/apt/bcfnt/bcfnt.cpp
     hle/service/apt/bcfnt/bcfnt.h
     hle/service/apt/errors.h
@@ -212,6 +232,7 @@ add_library(core STATIC
     hle/service/cam/cam.h
     hle/service/cam/cam_c.cpp
     hle/service/cam/cam_c.h
+    hle/service/cam/cam_params.h
     hle/service/cam/cam_q.cpp
     hle/service/cam/cam_q.h
     hle/service/cam/cam_s.cpp
@@ -320,10 +341,6 @@ add_library(core STATIC
     hle/service/nim/nim_s.h
     hle/service/nim/nim_u.cpp
     hle/service/nim/nim_u.h
-    hle/service/ns/ns.cpp
-    hle/service/ns/ns.h
-    hle/service/ns/ns_s.cpp
-    hle/service/ns/ns_s.h
     hle/service/nwm/nwm.cpp
     hle/service/nwm/nwm.h
     hle/service/nwm/nwm_cec.cpp
@@ -404,6 +421,8 @@ add_library(core STATIC
     hw/hw.h
     hw/lcd.cpp
     hw/lcd.h
+    hw/rsa/rsa.cpp
+    hw/rsa/rsa.h
     hw/y2r.cpp
     hw/y2r.h
     loader/3dsx.cpp
@@ -431,6 +450,8 @@ add_library(core STATIC
     rpc/server.h
     rpc/udp_server.cpp
     rpc/udp_server.h
+    savestate.cpp
+    savestate.h
     settings.cpp
     settings.h
     telemetry_session.cpp
@@ -440,16 +461,27 @@ add_library(core STATIC
     tracer/recorder.h
 )
 
+if (ENABLE_FFMPEG_VIDEO_DUMPER)
+    target_sources(core PRIVATE
+        dumping/ffmpeg_backend.cpp
+        dumping/ffmpeg_backend.h
+    )
+endif()
+
 create_target_directory_groups(core)
 
 target_link_libraries(core PUBLIC common PRIVATE audio_core network video_core)
-target_link_libraries(core PUBLIC Boost::boost PRIVATE cryptopp fmt open_source_archives)
+target_link_libraries(core PUBLIC Boost::boost PRIVATE cryptopp fmt open_source_archives Boost::serialization)
+
 if (ENABLE_WEB_SERVICE)
-    target_compile_definitions(core PRIVATE -DENABLE_WEB_SERVICE)
-    target_link_libraries(core PRIVATE web_service)
+    target_compile_definitions(core PRIVATE -DENABLE_WEB_SERVICE -DCPPHTTPLIB_OPENSSL_SUPPORT)
+    target_link_libraries(core PRIVATE web_service ${OPENSSL_LIBS} httplib)
+    if (ANDROID)
+        target_link_libraries(core PRIVATE ifaddrs)
+    endif()
 endif()
 
-if (ARCHITECTURE_x86_64)
+if (ARCHITECTURE_x86_64 OR ARCHITECTURE_ARM64)
     target_sources(core PRIVATE
         arm/dynarmic/arm_dynarmic.cpp
         arm/dynarmic/arm_dynarmic.h
@@ -457,4 +489,8 @@ if (ARCHITECTURE_x86_64)
         arm/dynarmic/arm_dynarmic_cp15.h
     )
     target_link_libraries(core PRIVATE dynarmic)
+endif()
+
+if (ENABLE_FFMPEG_VIDEO_DUMPER)
+    target_link_libraries(core PUBLIC FFmpeg::avcodec FFmpeg::avformat FFmpeg::swscale FFmpeg::swresample FFmpeg::avutil)
 endif()

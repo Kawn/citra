@@ -13,17 +13,18 @@
 #include "citra_qt/multiplayer/message.h"
 #include "citra_qt/multiplayer/state.h"
 #include "citra_qt/multiplayer/validation.h"
-#include "citra_qt/ui_settings.h"
+#include "citra_qt/uisettings.h"
 #include "common/logging/log.h"
 #include "core/hle/service/cfg/cfg.h"
-#include "core/settings.h"
 #include "network/network.h"
+#include "network/network_settings.h"
+#include "ui_lobby.h"
 #ifdef ENABLE_WEB_SERVICE
 #include "web_service/web_backend.h"
 #endif
 
 Lobby::Lobby(QWidget* parent, QStandardItemModel* list,
-             std::shared_ptr<Core::AnnounceMultiplayerSession> session)
+             std::shared_ptr<Network::AnnounceMultiplayerSession> session)
     : QDialog(parent, Qt::WindowTitleHint | Qt::WindowCloseButtonHint | Qt::WindowSystemMenuHint),
       ui(std::make_unique<Ui::Lobby>()), announce_multiplayer_session(session) {
     ui->setupUi(this);
@@ -35,13 +36,7 @@ Lobby::Lobby(QWidget* parent, QStandardItemModel* list,
 
     // Create a proxy to the game list to get the list of games owned
     game_list = new QStandardItemModel;
-
-    for (int i = 0; i < list->rowCount(); i++) {
-        auto parent = list->item(i, 0);
-        for (int j = 0; j < parent->rowCount(); j++) {
-            game_list->appendRow(parent->child(j)->clone());
-        }
-    }
+    UpdateGameList(list);
 
     proxy = new LobbyFilterProxyModel(this, game_list);
     proxy->setSourceModel(model);
@@ -63,16 +58,15 @@ Lobby::Lobby(QWidget* parent, QStandardItemModel* list,
 
     ui->nickname->setValidator(validation.GetNickname());
     ui->nickname->setText(UISettings::values.nickname);
-    if (ui->nickname->text().isEmpty() && !Settings::values.citra_username.empty()) {
+    if (ui->nickname->text().isEmpty() && !NetSettings::values.citra_username.empty()) {
         // Use Citra Web Service user name as nickname by default
-        ui->nickname->setText(QString::fromStdString(Settings::values.citra_username));
+        ui->nickname->setText(QString::fromStdString(NetSettings::values.citra_username));
     }
 
     // UI Buttons
-    connect(ui->refresh_list, &QPushButton::pressed, this, &Lobby::RefreshLobby);
-    connect(ui->games_owned, &QCheckBox::stateChanged, proxy,
-            &LobbyFilterProxyModel::SetFilterOwned);
-    connect(ui->hide_full, &QCheckBox::stateChanged, proxy, &LobbyFilterProxyModel::SetFilterFull);
+    connect(ui->refresh_list, &QPushButton::clicked, this, &Lobby::RefreshLobby);
+    connect(ui->games_owned, &QCheckBox::toggled, proxy, &LobbyFilterProxyModel::SetFilterOwned);
+    connect(ui->hide_full, &QCheckBox::toggled, proxy, &LobbyFilterProxyModel::SetFilterFull);
     connect(ui->search, &QLineEdit::textChanged, proxy, &LobbyFilterProxyModel::SetFilterSearch);
     connect(ui->room_list, &QTreeView::doubleClicked, this, &Lobby::OnJoinRoom);
     connect(ui->room_list, &QTreeView::clicked, this, &Lobby::OnExpandRoom);
@@ -88,14 +82,29 @@ Lobby::Lobby(QWidget* parent, QStandardItemModel* list,
     RefreshLobby();
 }
 
+Lobby::~Lobby() = default;
+
+void Lobby::UpdateGameList(QStandardItemModel* list) {
+    game_list->clear();
+    for (int i = 0; i < list->rowCount(); i++) {
+        auto parent = list->item(i, 0);
+        for (int j = 0; j < parent->rowCount(); j++) {
+            game_list->appendRow(parent->child(j)->clone());
+        }
+    }
+    if (proxy)
+        proxy->UpdateGameList(game_list);
+}
+
 void Lobby::RetranslateUi() {
     ui->retranslateUi(this);
 }
 
 QString Lobby::PasswordPrompt() {
     bool ok;
-    const QString text = QInputDialog::getText(this, tr("Password Required to Join"),
-                                               tr("Password:"), QLineEdit::Password, "", &ok);
+    const QString text =
+        QInputDialog::getText(this, tr("Password Required to Join"), tr("Password:"),
+                              QLineEdit::Password, QString(), &ok);
     return ok ? text : QString();
 }
 
@@ -122,7 +131,7 @@ void Lobby::OnJoinRoom(const QModelIndex& source) {
         index = source.parent();
     }
     if (!ui->nickname->hasAcceptableInput()) {
-        NetworkMessage::ShowError(NetworkMessage::USERNAME_NOT_VALID);
+        NetworkMessage::ErrorManager::ShowError(NetworkMessage::ErrorManager::USERNAME_NOT_VALID);
         return;
     }
 
@@ -146,9 +155,11 @@ void Lobby::OnJoinRoom(const QModelIndex& source) {
     QFuture<void> f = QtConcurrent::run([nickname, ip, port, password, verify_UID] {
         std::string token;
 #ifdef ENABLE_WEB_SERVICE
-        if (!Settings::values.citra_username.empty() && !Settings::values.citra_token.empty()) {
-            WebService::Client client(Settings::values.web_api_url, Settings::values.citra_username,
-                                      Settings::values.citra_token);
+        if (!NetSettings::values.citra_username.empty() &&
+            !NetSettings::values.citra_token.empty()) {
+            WebService::Client client(NetSettings::values.web_api_url,
+                                      NetSettings::values.citra_username,
+                                      NetSettings::values.citra_token);
             token = client.GetExternalJWT(verify_UID).returned_data;
             if (token.empty()) {
                 LOG_ERROR(WebService, "Could not get external JWT, verification may fail");
@@ -170,13 +181,12 @@ void Lobby::OnJoinRoom(const QModelIndex& source) {
     UISettings::values.nickname = ui->nickname->text();
     UISettings::values.ip = proxy->data(connection_index, LobbyItemHost::HostIPRole).toString();
     UISettings::values.port = proxy->data(connection_index, LobbyItemHost::HostPortRole).toString();
-    Settings::Apply();
 }
 
 void Lobby::ResetModel() {
     model->clear();
     model->insertColumns(0, Column::TOTAL);
-    model->setHeaderData(Column::EXPAND, Qt::Horizontal, "", Qt::DisplayRole);
+    model->setHeaderData(Column::EXPAND, Qt::Horizontal, QString(), Qt::DisplayRole);
     model->setHeaderData(Column::ROOM_NAME, Qt::Horizontal, tr("Room Name"), Qt::DisplayRole);
     model->setHeaderData(Column::GAME_NAME, Qt::Horizontal, tr("Preferred Game"), Qt::DisplayRole);
     model->setHeaderData(Column::HOST, Qt::Horizontal, tr("Host"), Qt::DisplayRole);
@@ -259,6 +269,10 @@ void Lobby::OnRefreshLobby() {
 
 LobbyFilterProxyModel::LobbyFilterProxyModel(QWidget* parent, QStandardItemModel* list)
     : QSortFilterProxyModel(parent), game_list(list) {}
+
+void LobbyFilterProxyModel::UpdateGameList(QStandardItemModel* list) {
+    game_list = list;
+}
 
 bool LobbyFilterProxyModel::filterAcceptsRow(int sourceRow, const QModelIndex& sourceParent) const {
     // Prioritize filters by fastest to compute

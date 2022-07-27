@@ -8,6 +8,8 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <boost/serialization/export.hpp>
+#include <boost/serialization/shared_ptr.hpp>
 #include "common/common_types.h"
 #include "common/file_util.h"
 #include "core/file_sys/archive_backend.h"
@@ -31,6 +33,15 @@ class IVFCDelayGenerator : public DelayGenerator {
         u64 IPCDelayNanoseconds = std::max<u64>(static_cast<u64>(length) * slope + offset, minimum);
         return IPCDelayNanoseconds;
     }
+
+    u64 GetOpenDelayNs() override {
+        // This is the delay measured for a romfs open.
+        // For now we will take that as a default
+        static constexpr u64 IPCDelayNanoseconds(9438006);
+        return IPCDelayNanoseconds;
+    }
+
+    SERIALIZE_DELAY_GENERATOR
 };
 
 class RomFSDelayGenerator : public DelayGenerator {
@@ -45,6 +56,16 @@ public:
         u64 IPCDelayNanoseconds = std::max<u64>(static_cast<u64>(length) * slope + offset, minimum);
         return IPCDelayNanoseconds;
     }
+
+    u64 GetOpenDelayNs() override {
+        // This is the delay measured on O3DS and O2DS with
+        // https://gist.github.com/FearlessTobi/eb1d70619c65c7e6f02141d71e79a36e
+        // from the results the average of each length was taken.
+        static constexpr u64 IPCDelayNanoseconds(9438006);
+        return IPCDelayNanoseconds;
+    }
+
+    SERIALIZE_DELAY_GENERATOR
 };
 
 class ExeFSDelayGenerator : public DelayGenerator {
@@ -59,6 +80,16 @@ public:
         u64 IPCDelayNanoseconds = std::max<u64>(static_cast<u64>(length) * slope + offset, minimum);
         return IPCDelayNanoseconds;
     }
+
+    u64 GetOpenDelayNs() override {
+        // This is the delay measured on O3DS and O2DS with
+        // https://gist.github.com/FearlessTobi/eb1d70619c65c7e6f02141d71e79a36e
+        // from the results the average of each length was taken.
+        static constexpr u64 IPCDelayNanoseconds(9438006);
+        return IPCDelayNanoseconds;
+    }
+
+    SERIALIZE_DELAY_GENERATOR
 };
 
 /**
@@ -68,7 +99,8 @@ public:
  */
 class IVFCArchive : public ArchiveBackend {
 public:
-    IVFCArchive(std::shared_ptr<RomFSReader> file);
+    IVFCArchive(std::shared_ptr<RomFSReader> file,
+                std::unique_ptr<DelayGenerator> delay_generator_);
 
     std::string GetName() const override;
 
@@ -104,6 +136,15 @@ public:
 
 private:
     std::shared_ptr<RomFSReader> romfs_file;
+
+    IVFCFile() = default;
+
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int) {
+        ar& boost::serialization::base_object<FileBackend>(*this);
+        ar& romfs_file;
+    }
+    friend class boost::serialization::access;
 };
 
 class IVFCDirectory : public DirectoryBackend {
@@ -135,6 +176,23 @@ private:
     std::vector<u8> romfs_file;
     u64 data_offset;
     u64 data_size;
+
+    IVFCFileInMemory() = default;
+
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int) {
+        ar& boost::serialization::base_object<FileBackend>(*this);
+        ar& romfs_file;
+        ar& data_offset;
+        ar& data_size;
+    }
+    friend class boost::serialization::access;
 };
 
 } // namespace FileSys
+
+BOOST_CLASS_EXPORT_KEY(FileSys::IVFCFile)
+BOOST_CLASS_EXPORT_KEY(FileSys::IVFCFileInMemory)
+BOOST_CLASS_EXPORT_KEY(FileSys::IVFCDelayGenerator)
+BOOST_CLASS_EXPORT_KEY(FileSys::RomFSDelayGenerator)
+BOOST_CLASS_EXPORT_KEY(FileSys::ExeFSDelayGenerator)

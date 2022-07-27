@@ -11,7 +11,7 @@
 #include <QFileInfo>
 #include <QTimer>
 #include <QXmlStreamReader>
-#include "citra_qt/ui_settings.h"
+#include "citra_qt/uisettings.h"
 #include "citra_qt/updater/updater.h"
 #include "citra_qt/updater/updater_p.h"
 #include "common/logging/log.h"
@@ -133,8 +133,9 @@ bool UpdaterPrivate::StartUpdateCheck() {
     connect(main_process,
             static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished), this,
             &UpdaterPrivate::UpdaterReady, Qt::QueuedConnection);
-    connect(main_process, static_cast<void (QProcess::*)(QProcess::ProcessError)>(&QProcess::error),
-            this, &UpdaterPrivate::UpdaterError, Qt::QueuedConnection);
+    connect(main_process,
+            static_cast<void (QProcess::*)(QProcess::ProcessError)>(&QProcess::errorOccurred), this,
+            &UpdaterPrivate::UpdaterError, Qt::QueuedConnection);
 
     main_process->start(QIODevice::ReadOnly);
     running = true;

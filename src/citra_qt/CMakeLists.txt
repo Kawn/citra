@@ -1,5 +1,6 @@
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
+set(CMAKE_AUTOUIC ON)
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${PROJECT_SOURCE_DIR}/CMakeModules)
 if (POLICY CMP0071)
@@ -10,6 +11,9 @@ add_executable(citra-qt
     Info.plist
     aboutdialog.cpp
     aboutdialog.h
+    aboutdialog.ui
+    applets/mii_selector.cpp
+    applets/mii_selector.h
     applets/swkbd.cpp
     applets/swkbd.h
     bootmanager.cpp
@@ -26,33 +30,59 @@ add_executable(citra-qt
     camera/qt_multimedia_camera.h
     cheats.cpp
     cheats.h
+    cheats.ui
     citra-qt.rc
+    compatdb.cpp
+    compatdb.h
+    compatdb.ui
     configuration/config.cpp
     configuration/config.h
+    configuration/configure.ui
     configuration/configure_audio.cpp
     configuration/configure_audio.h
+    configuration/configure_audio.ui
     configuration/configure_camera.cpp
     configuration/configure_camera.h
+    configuration/configure_camera.ui
     configuration/configure_debug.cpp
     configuration/configure_debug.h
+    configuration/configure_debug.ui
+    configuration/configure_enhancements.cpp
+    configuration/configure_enhancements.h
+    configuration/configure_enhancements.ui
     configuration/configure_dialog.cpp
     configuration/configure_dialog.h
     configuration/configure_general.cpp
     configuration/configure_general.h
+    configuration/configure_general.ui
     configuration/configure_graphics.cpp
     configuration/configure_graphics.h
+    configuration/configure_graphics.ui
     configuration/configure_hotkeys.cpp
     configuration/configure_hotkeys.h
+    configuration/configure_hotkeys.ui
     configuration/configure_input.cpp
     configuration/configure_input.h
+    configuration/configure_input.ui
     configuration/configure_motion_touch.cpp
     configuration/configure_motion_touch.h
+    configuration/configure_motion_touch.ui
+    configuration/configure_storage.cpp
+    configuration/configure_storage.h
+    configuration/configure_storage.ui
     configuration/configure_system.cpp
     configuration/configure_system.h
+    configuration/configure_system.ui
+    configuration/configure_touch_from_button.cpp
+    configuration/configure_touch_from_button.h
+    configuration/configure_touch_from_button.ui
+    configuration/configure_touch_widget.h
     configuration/configure_ui.cpp
     configuration/configure_ui.h
+    configuration/configure_ui.ui
     configuration/configure_web.cpp
     configuration/configure_web.h
+    configuration/configure_web.ui
     debugger/console.h
     debugger/console.cpp
     debugger/graphics/graphics.cpp
@@ -70,12 +100,19 @@ add_executable(citra-qt
     debugger/graphics/graphics_tracing.h
     debugger/graphics/graphics_vertex_shader.cpp
     debugger/graphics/graphics_vertex_shader.h
+    debugger/ipc/record_dialog.cpp
+    debugger/ipc/record_dialog.h
+    debugger/ipc/record_dialog.ui
+    debugger/ipc/recorder.cpp
+    debugger/ipc/recorder.h
+    debugger/ipc/recorder.ui
     debugger/lle_service_modules.cpp
     debugger/lle_service_modules.h
     debugger/profiler.cpp
     debugger/profiler.h
     debugger/registers.cpp
     debugger/registers.h
+    debugger/registers.ui
     debugger/wait_tree.cpp
     debugger/wait_tree.h
     discord.h
@@ -86,28 +123,46 @@ add_executable(citra-qt
     game_list_worker.h
     hotkeys.cpp
     hotkeys.h
+    loading_screen.cpp
+    loading_screen.h
+    loading_screen.ui
     main.cpp
     main.h
-    multiplayer/chat_room.h
+    main.ui
+    movie/movie_play_dialog.cpp
+    movie/movie_play_dialog.h
+    movie/movie_play_dialog.ui
+    movie/movie_record_dialog.cpp
+    movie/movie_record_dialog.h
+    movie/movie_record_dialog.ui
     multiplayer/chat_room.cpp
+    multiplayer/chat_room.h
+    multiplayer/chat_room.ui
     multiplayer/client_room.h
     multiplayer/client_room.cpp
-    multiplayer/direct_connect.h
+    multiplayer/client_room.ui
     multiplayer/direct_connect.cpp
-    multiplayer/host_room.h
+    multiplayer/direct_connect.h
+    multiplayer/direct_connect.ui
     multiplayer/host_room.cpp
-    multiplayer/lobby.h
-    multiplayer/lobby_p.h
+    multiplayer/host_room.h
+    multiplayer/host_room.ui
     multiplayer/lobby.cpp
-    multiplayer/message.h
+    multiplayer/lobby.h
+    multiplayer/lobby.ui
+    multiplayer/lobby_p.h
     multiplayer/message.cpp
+    multiplayer/message.h
     multiplayer/moderation_dialog.cpp
     multiplayer/moderation_dialog.h
+    multiplayer/moderation_dialog.ui
     multiplayer/state.cpp
     multiplayer/state.h
     multiplayer/validation.h
-    ui_settings.cpp
-    ui_settings.h
+    uisettings.cpp
+    uisettings.h
+    qt_image_interface.cpp
+    qt_image_interface.h
     updater/updater.cpp
     updater/updater.h
     updater/updater_p.h
@@ -119,43 +174,27 @@ add_executable(citra-qt
     util/spinbox.h
     util/util.cpp
     util/util.h
-    compatdb.cpp
-    compatdb.h
 )
 
-set(UIS
-    configuration/configure.ui
-    configuration/configure_audio.ui
-    configuration/configure_camera.ui
-    configuration/configure_debug.ui
-    configuration/configure_general.ui
-    configuration/configure_graphics.ui
-    configuration/configure_hotkeys.ui
-    configuration/configure_input.ui
-    configuration/configure_motion_touch.ui
-    configuration/configure_system.ui
-    configuration/configure_ui.ui
-    configuration/configure_web.ui
-    debugger/registers.ui
-    multiplayer/direct_connect.ui
-    multiplayer/lobby.ui
-    multiplayer/chat_room.ui
-    multiplayer/client_room.ui
-    multiplayer/host_room.ui
-    multiplayer/moderation_dialog.ui
-    aboutdialog.ui
-    cheats.ui
-    main.ui
-    compatdb.ui
-)
+if (ENABLE_FFMPEG_VIDEO_DUMPER)
+    target_sources(citra-qt PRIVATE
+        dumping/dumping_dialog.cpp
+        dumping/dumping_dialog.h
+        dumping/dumping_dialog.ui
+        dumping/option_set_dialog.cpp
+        dumping/option_set_dialog.h
+        dumping/option_set_dialog.ui
+        dumping/options_dialog.cpp
+        dumping/options_dialog.h
+        dumping/options_dialog.ui
+    )
+endif()
 
 file(GLOB COMPAT_LIST
      ${PROJECT_BINARY_DIR}/dist/compatibility_list/compatibility_list.qrc
      ${PROJECT_BINARY_DIR}/dist/compatibility_list/compatibility_list.json)
 file(GLOB_RECURSE ICONS ${PROJECT_SOURCE_DIR}/dist/icons/*)
 file(GLOB_RECURSE THEMES ${PROJECT_SOURCE_DIR}/dist/qt_themes/*)
-
-qt5_wrap_ui(UI_HDRS ${UIS})
 
 if (ENABLE_QT_TRANSLATION)
     set(CITRA_QT_LANGUAGES "${PROJECT_SOURCE_DIR}/dist/languages" CACHE PATH "Path to the translation bundle for the Qt frontend")
@@ -194,10 +233,8 @@ target_sources(citra-qt
     PRIVATE
         ${COMPAT_LIST}
         ${ICONS}
-        ${THEMES}
-        ${UI_HDRS}
-        ${UIS}
         ${LANGUAGES}
+        ${THEMES}
 )
 
 if (APPLE)
@@ -206,6 +243,10 @@ if (APPLE)
     target_sources(citra-qt PRIVATE ${MACOSX_ICON})
     set_target_properties(citra-qt PROPERTIES MACOSX_BUNDLE TRUE)
     set_target_properties(citra-qt PROPERTIES MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_SOURCE_DIR}/Info.plist)
+    target_sources(citra-qt PRIVATE
+        macos_authorization.h
+        macos_authorization.mm
+    )
 elseif(WIN32)
     # compile as a win32 gui application instead of a console application
     target_link_libraries(citra-qt PRIVATE Qt5::WinMain)
@@ -219,8 +260,27 @@ endif()
 create_target_directory_groups(citra-qt)
 
 target_link_libraries(citra-qt PRIVATE audio_core common core input_common network video_core)
-target_link_libraries(citra-qt PRIVATE Boost::boost glad nihstro-headers Qt5::OpenGL Qt5::Widgets Qt5::Multimedia)
+target_link_libraries(citra-qt PRIVATE Boost::boost glad nihstro-headers Qt5::Widgets Qt5::Multimedia)
 target_link_libraries(citra-qt PRIVATE ${PLATFORM_LIBRARIES} Threads::Threads)
+
+target_compile_definitions(citra-qt PRIVATE
+    # Use QStringBuilder for string concatenation to reduce
+    # the overall number of temporary strings created.
+    -DQT_USE_QSTRINGBUILDER
+
+    # Disable implicit type narrowing in signal/slot connect() calls.
+    -DQT_NO_NARROWING_CONVERSIONS_IN_CONNECT
+
+    # Disable unsafe overloads of QProcess' start() function.
+    -DQT_NO_PROCESS_COMBINED_ARGUMENT_START
+
+    # Disable implicit QString->QUrl conversions to enforce use of proper resolving functions.
+    -DQT_NO_URL_CAST_FROM_STRING
+
+    # Disable implicit conversions from/to C strings
+    -DQT_NO_CAST_FROM_ASCII
+    -DQT_NO_CAST_TO_ASCII
+)
 
 if (CITRA_ENABLE_COMPATIBILITY_REPORTING)
     target_compile_definitions(citra-qt PRIVATE -DCITRA_ENABLE_COMPATIBILITY_REPORTING)
@@ -248,4 +308,9 @@ if (MSVC)
     include(CopyCitraSDLDeps)
     copy_citra_Qt5_deps(citra-qt)
     copy_citra_SDL_deps(citra-qt)
+
+    if (ENABLE_FFMPEG)
+        include(CopyCitraFFmpegDeps)
+        copy_citra_FFmpeg_deps(citra-qt)
+    endif()
 endif()

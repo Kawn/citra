@@ -3,9 +3,13 @@
 // Refer to the license.txt file included.
 
 #include <algorithm>
+#include <array>
 #include <tuple>
+#include <boost/serialization/array.hpp>
+#include <boost/serialization/unique_ptr.hpp>
 #include <cryptopp/osrng.h>
 #include <cryptopp/sha.h>
+#include "common/archives.h"
 #include "common/common_paths.h"
 #include "common/file_util.h"
 #include "common/logging/log.h"
@@ -24,10 +28,20 @@
 #include "core/hle/service/cfg/cfg_u.h"
 #include "core/settings.h"
 
+SERIALIZE_EXPORT_IMPL(Service::CFG::Module)
+
 namespace Service::CFG {
 
+template <class Archive>
+void Module::serialize(Archive& ar, const unsigned int) {
+    ar& cfg_config_file_buffer;
+    ar& cfg_system_save_data_archive;
+    ar& preferred_region_code;
+}
+SERIALIZE_IMPL(Module)
+
 /// The maximum number of block entries that can exist in the config file
-static const u32 CONFIG_FILE_MAX_BLOCK_ENTRIES = 1479;
+constexpr u32 CONFIG_FILE_MAX_BLOCK_ENTRIES = 1479;
 
 namespace {
 
@@ -61,6 +75,7 @@ enum ConfigBlockID {
     StateNameBlockID = 0x000B0002,
     EULAVersionBlockID = 0x000D0000,
     ConsoleModelBlockID = 0x000F0004,
+    DebugModeBlockID = 0x00130000,
 };
 
 struct UsernameBlock {
@@ -83,34 +98,38 @@ struct ConsoleModelInfo {
 static_assert(sizeof(ConsoleModelInfo) == 4, "ConsoleModelInfo must be exactly 4 bytes");
 
 struct ConsoleCountryInfo {
-    u8 unknown[3];   ///< Unknown data
+    u8 unknown[2];   ///< Unknown data
+    u8 state_code;   ///< The state or province code.
     u8 country_code; ///< The country code of the console
 };
 static_assert(sizeof(ConsoleCountryInfo) == 4, "ConsoleCountryInfo must be exactly 4 bytes");
 } // namespace
 
-static const ConsoleModelInfo CONSOLE_MODEL = {NINTENDO_3DS_XL, {0, 0, 0}};
-static const u8 CONSOLE_LANGUAGE = LANGUAGE_EN;
-static const UsernameBlock CONSOLE_USERNAME_BLOCK = {u"CITRA", 0, 0};
-static const BirthdayBlock PROFILE_BIRTHDAY = {3, 25}; // March 25th, 2014
-static const u8 SOUND_OUTPUT_MODE = SOUND_SURROUND;
-static const u8 UNITED_STATES_COUNTRY_ID = 49;
+constexpr EULAVersion MAX_EULA_VERSION{0x7F, 0x7F};
+constexpr ConsoleModelInfo CONSOLE_MODEL_OLD{NINTENDO_3DS_XL, {0, 0, 0}};
+constexpr ConsoleModelInfo CONSOLE_MODEL_NEW{NEW_NINTENDO_3DS_XL, {0, 0, 0}};
+constexpr u8 CONSOLE_LANGUAGE = LANGUAGE_EN;
+constexpr UsernameBlock CONSOLE_USERNAME_BLOCK{u"CITRA", 0, 0};
+constexpr BirthdayBlock PROFILE_BIRTHDAY{3, 25}; // March 25th, 2014
+constexpr u8 SOUND_OUTPUT_MODE = SOUND_SURROUND;
+constexpr u8 UNITED_STATES_COUNTRY_ID = 49;
+constexpr u8 WASHINGTON_DC_STATE_ID = 2;
 /// TODO(Subv): Find what the other bytes are
-static const ConsoleCountryInfo COUNTRY_INFO = {{0, 0, 0}, UNITED_STATES_COUNTRY_ID};
+constexpr ConsoleCountryInfo COUNTRY_INFO{{0, 0}, WASHINGTON_DC_STATE_ID, UNITED_STATES_COUNTRY_ID};
 
 /**
  * TODO(Subv): Find out what this actually is, these values fix some NaN uniforms in some games,
  * for example Nintendo Zone
  * Thanks Normmatt for providing this information
  */
-static const std::array<float, 8> STEREO_CAMERA_SETTINGS = {
+constexpr std::array<float, 8> STEREO_CAMERA_SETTINGS = {
     62.0f, 289.0f, 76.80000305175781f, 46.08000183105469f,
     10.0f, 5.0f,   55.58000183105469f, 21.56999969482422f,
 };
 static_assert(sizeof(STEREO_CAMERA_SETTINGS) == 0x20,
               "STEREO_CAMERA_SETTINGS must be exactly 0x20 bytes");
 
-static const std::vector<u8> cfg_system_savedata_id = {
+constexpr std::array<u8, 8> cfg_system_savedata_id{
     0x00, 0x00, 0x00, 0x00, 0x17, 0x00, 0x01, 0x00,
 };
 
@@ -232,6 +251,18 @@ void Module::Interface::GetSystemModel(Kernel::HLERequestContext& ctx) {
 
     // TODO(Subv): Find out the correct error codes
     rb.Push(cfg->GetConfigInfoBlock(ConsoleModelBlockID, 4, 0x8, reinterpret_cast<u8*>(&data)));
+    ConsoleModelInfo model;
+    std::memcpy(&model, &data, 4);
+    if ((model.model == NINTENDO_3DS || model.model == NINTENDO_3DS_XL ||
+         model.model == NINTENDO_2DS) &&
+        Settings::values.is_new_3ds) {
+        model.model = NEW_NINTENDO_3DS_XL;
+    } else if ((model.model == NEW_NINTENDO_3DS || model.model == NEW_NINTENDO_3DS_XL ||
+                model.model == NEW_NINTENDO_2DS_XL) &&
+               !Settings::values.is_new_3ds) {
+        model.model = NINTENDO_3DS_XL;
+    }
+    std::memcpy(&data, &model, 4);
     rb.Push<u8>(data & 0xFF);
 }
 
@@ -437,9 +468,7 @@ ResultCode Module::FormatConfig() {
     if (!res.IsSuccess())
         return res;
 
-    u32 random_number;
-    u64 console_id;
-    GenerateConsoleUniqueId(random_number, console_id);
+    const auto [random_number, console_id] = GenerateConsoleUniqueId();
 
     u64_le console_id_le = console_id;
     res = CreateConfigInfoBlk(ConsoleUniqueID1BlockID, sizeof(console_id_le), 0xE, &console_id_le);
@@ -505,11 +534,18 @@ ResultCode Module::FormatConfig() {
         return res;
 
     // 0x000D0000 - Accepted EULA version
-    res = CreateConfigInfoBlk(EULAVersionBlockID, 0x4, 0xE, zero_buffer);
+    u32_le data = MAX_EULA_VERSION.minor + (MAX_EULA_VERSION.major << 8);
+    res = CreateConfigInfoBlk(EULAVersionBlockID, sizeof(data), 0xE, &data);
     if (!res.IsSuccess())
         return res;
 
-    res = CreateConfigInfoBlk(ConsoleModelBlockID, sizeof(CONSOLE_MODEL), 0xC, &CONSOLE_MODEL);
+    res = CreateConfigInfoBlk(ConsoleModelBlockID, sizeof(CONSOLE_MODEL_OLD), 0xC,
+                              &CONSOLE_MODEL_OLD);
+    if (!res.IsSuccess())
+        return res;
+
+    // 0x00130000 - DebugMode (0x100 for debug mode)
+    res = CreateConfigInfoBlk(DebugModeBlockID, 0x4, 0xE, zero_buffer);
     if (!res.IsSuccess())
         return res;
 
@@ -523,10 +559,10 @@ ResultCode Module::FormatConfig() {
     if (!res.IsSuccess())
         return res;
     return RESULT_SUCCESS;
-}
+} // namespace Service::CFG
 
 ResultCode Module::LoadConfigNANDSaveFile() {
-    std::string nand_directory = FileUtil::GetUserPath(FileUtil::UserPath::NANDDir);
+    const std::string& nand_directory = FileUtil::GetUserPath(FileUtil::UserPath::NANDDir);
     FileSys::ArchiveFactory_SystemSaveData systemsavedata_factory(nand_directory);
 
     // Open the SystemSaveData archive 0x00010017
@@ -564,6 +600,15 @@ ResultCode Module::LoadConfigNANDSaveFile() {
 
 Module::Module() {
     LoadConfigNANDSaveFile();
+    // Check the config savegame EULA Version and update it to 0x7F7F if necessary
+    // so users will never get a promt to accept EULA
+    EULAVersion version = GetEULAVersion();
+    if (version.major != MAX_EULA_VERSION.major || version.minor != MAX_EULA_VERSION.minor) {
+        LOG_INFO(Service_CFG, "Updating accepted EULA version to {}.{}", MAX_EULA_VERSION.major,
+                 MAX_EULA_VERSION.minor);
+        SetEULAVersion(Service::CFG::MAX_EULA_VERSION);
+        UpdateConfigNANDSavegame();
+    }
 }
 
 Module::~Module() = default;
@@ -613,7 +658,7 @@ void Module::SetPreferredRegionCodes(const std::vector<u32>& region_codes) {
     if (Settings::values.region_value == Settings::REGION_VALUE_AUTO_SELECT) {
         if (current_language != adjusted_language) {
             LOG_WARNING(Service_CFG, "System language {} does not fit the region. Adjusted to {}",
-                        static_cast<int>(current_language), static_cast<int>(adjusted_language));
+                        current_language, adjusted_language);
             SetSystemLanguage(adjusted_language);
         }
     }
@@ -632,7 +677,7 @@ std::u16string Module::GetUsername() {
 
     // the username string in the block isn't null-terminated,
     // so we need to find the end manually.
-    std::u16string username(block.username, ARRAY_SIZE(block.username));
+    std::u16string username(block.username, std::size(block.username));
     const std::size_t pos = username.find(u'\0');
     if (pos != std::u16string::npos)
         username.erase(pos);
@@ -673,7 +718,7 @@ SoundOutputMode Module::GetSoundOutputMode() {
 }
 
 void Module::SetCountryCode(u8 country_code) {
-    ConsoleCountryInfo block = {{0, 0, 0}, country_code};
+    ConsoleCountryInfo block = {{0, 0}, default_subregion[country_code], country_code};
     SetConfigInfoBlock(CountryInfoBlockID, sizeof(block), 4, &block);
 }
 
@@ -683,13 +728,29 @@ u8 Module::GetCountryCode() {
     return block.country_code;
 }
 
-void Module::GenerateConsoleUniqueId(u32& random_number, u64& console_id) {
+void Module::SetCountryInfo(u8 country_code, u8 state_code) {
+    ConsoleCountryInfo block = {{0, 0}, state_code, country_code};
+    SetConfigInfoBlock(CountryInfoBlockID, sizeof(block), 4, &block);
+}
+
+u8 Module::GetStateCode() {
+    ConsoleCountryInfo block;
+    GetConfigInfoBlock(CountryInfoBlockID, sizeof(block), 8, &block);
+    return block.state_code;
+}
+
+std::pair<u32, u64> Module::GenerateConsoleUniqueId() const {
     CryptoPP::AutoSeededRandomPool rng;
-    random_number = rng.GenerateWord32(0, 0xFFFF);
+    const u32 random_number = rng.GenerateWord32(0, 0xFFFF);
+
     u64_le local_friend_code_seed;
     rng.GenerateBlock(reinterpret_cast<CryptoPP::byte*>(&local_friend_code_seed),
                       sizeof(local_friend_code_seed));
-    console_id = (local_friend_code_seed & 0x3FFFFFFFF) | (static_cast<u64>(random_number) << 48);
+
+    const u64 console_id =
+        (local_friend_code_seed & 0x3FFFFFFFF) | (static_cast<u64>(random_number) << 48);
+
+    return std::make_pair(random_number, console_id);
 }
 
 ResultCode Module::SetConsoleUniqueId(u32 random_number, u64 console_id) {
@@ -716,6 +777,20 @@ u64 Module::GetConsoleUniqueId() {
     u64_le console_id_le;
     GetConfigInfoBlock(ConsoleUniqueID2BlockID, sizeof(console_id_le), 0xE, &console_id_le);
     return console_id_le;
+}
+
+EULAVersion Module::GetEULAVersion() {
+    u32_le data;
+    GetConfigInfoBlock(EULAVersionBlockID, sizeof(data), 0xE, &data);
+    EULAVersion version;
+    version.minor = data & 0xFF;
+    version.major = (data >> 8) & 0xFF;
+    return version;
+}
+
+void Module::SetEULAVersion(const EULAVersion& version) {
+    u32_le data = version.minor + (version.major << 8);
+    SetConfigInfoBlock(EULAVersionBlockID, sizeof(data), 0xE, &data);
 }
 
 std::shared_ptr<Module> GetModule(Core::System& system) {

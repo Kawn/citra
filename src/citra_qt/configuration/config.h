@@ -8,7 +8,6 @@
 #include <memory>
 #include <string>
 #include <QVariant>
-#include "citra_qt/ui_settings.h"
 #include "core/settings.h"
 
 class QSettings;
@@ -26,13 +25,53 @@ public:
 
 private:
     void ReadValues();
+    void ReadAudioValues();
+    void ReadCameraValues();
+    void ReadControlValues();
+    void ReadCoreValues();
+    void ReadDataStorageValues();
+    void ReadDebuggingValues();
+    void ReadLayoutValues();
+    void ReadMiscellaneousValues();
+    void ReadMultiplayerValues();
+    void ReadPathValues();
+    void ReadRendererValues();
+    void ReadShortcutValues();
+    void ReadSystemValues();
+    void ReadUIValues();
+    void ReadUIGameListValues();
+    void ReadUILayoutValues();
+    void ReadUpdaterValues();
+    void ReadUtilityValues();
+    void ReadWebServiceValues();
+    void ReadVideoDumpingValues();
+
     void SaveValues();
+    void SaveAudioValues();
+    void SaveCameraValues();
+    void SaveControlValues();
+    void SaveCoreValues();
+    void SaveDataStorageValues();
+    void SaveDebuggingValues();
+    void SaveLayoutValues();
+    void SaveMiscellaneousValues();
+    void SaveMultiplayerValues();
+    void SavePathValues();
+    void SaveRendererValues();
+    void SaveShortcutValues();
+    void SaveSystemValues();
+    void SaveUIValues();
+    void SaveUIGameListValues();
+    void SaveUILayoutValues();
+    void SaveUpdaterValues();
+    void SaveUtilityValues();
+    void SaveWebServiceValues();
+    void SaveVideoDumpingValues();
+
     QVariant ReadSetting(const QString& name) const;
     QVariant ReadSetting(const QString& name, const QVariant& default_value) const;
     void WriteSetting(const QString& name, const QVariant& value);
     void WriteSetting(const QString& name, const QVariant& value, const QVariant& default_value);
-
-    static const std::array<UISettings::Shortcut, 20> default_hotkeys;
 
     std::unique_ptr<QSettings> qt_config;
     std::string qt_config_loc;

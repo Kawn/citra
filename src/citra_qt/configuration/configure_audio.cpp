@@ -3,21 +3,32 @@
 // Refer to the license.txt file included.
 
 #include <memory>
+#include <QtGlobal>
+#ifdef HAVE_CUBEB
+#include "audio_core/cubeb_input.h"
+#endif
 #include "audio_core/sink.h"
 #include "audio_core/sink_details.h"
 #include "citra_qt/configuration/configure_audio.h"
 #include "core/core.h"
+#include "core/frontend/mic.h"
 #include "core/settings.h"
 #include "ui_configure_audio.h"
+
+#if defined(__APPLE__)
+#include "citra_qt/macos_authorization.h"
+#endif
+
+constexpr int DEFAULT_INPUT_DEVICE_INDEX = 0;
 
 ConfigureAudio::ConfigureAudio(QWidget* parent)
     : QWidget(parent), ui(std::make_unique<Ui::ConfigureAudio>()) {
     ui->setupUi(this);
 
     ui->output_sink_combo_box->clear();
-    ui->output_sink_combo_box->addItem("auto");
+    ui->output_sink_combo_box->addItem(QString::fromUtf8(AudioCore::auto_device_name));
     for (const char* id : AudioCore::GetSinkIDs()) {
-        ui->output_sink_combo_box->addItem(id);
+        ui->output_sink_combo_box->addItem(QString::fromUtf8(id));
     }
 
     ui->emulation_combo_box->addItem(tr("HLE (fast)"));
@@ -26,27 +37,37 @@ ConfigureAudio::ConfigureAudio(QWidget* parent)
     ui->emulation_combo_box->setEnabled(!Core::System::GetInstance().IsPoweredOn());
 
     connect(ui->volume_slider, &QSlider::valueChanged, this,
-            &ConfigureAudio::setVolumeIndicatorText);
+            &ConfigureAudio::SetVolumeIndicatorText);
 
-    this->setConfiguration();
-    connect(ui->output_sink_combo_box,
-            static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged), this,
-            &ConfigureAudio::updateAudioDevices);
+    ui->input_device_combo_box->clear();
+    ui->input_device_combo_box->addItem(tr("Default"));
+#ifdef HAVE_CUBEB
+    for (const auto& device : AudioCore::ListCubebInputDevices()) {
+        ui->input_device_combo_box->addItem(QString::fromStdString(device));
+    }
+#endif
+    connect(ui->input_type_combo_box, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            &ConfigureAudio::UpdateAudioInputDevices);
+
+    SetConfiguration();
+    connect(ui->output_sink_combo_box, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            &ConfigureAudio::UpdateAudioOutputDevices);
 }
 
 ConfigureAudio::~ConfigureAudio() {}
 
-void ConfigureAudio::setConfiguration() {
-    setOutputSinkFromSinkID();
+void ConfigureAudio::SetConfiguration() {
+    SetOutputSinkFromSinkID();
 
     // The device list cannot be pre-populated (nor listed) until the output sink is known.
-    updateAudioDevices(ui->output_sink_combo_box->currentIndex());
+    UpdateAudioOutputDevices(ui->output_sink_combo_box->currentIndex());
 
-    setAudioDeviceFromDeviceID();
+    SetAudioDeviceFromDeviceID();
 
     ui->toggle_audio_stretching->setChecked(Settings::values.enable_audio_stretching);
-    ui->volume_slider->setValue(Settings::values.volume * ui->volume_slider->maximum());
-    setVolumeIndicatorText(ui->volume_slider->sliderPosition());
+    ui->volume_slider->setValue(
+        static_cast<int>(Settings::values.volume * ui->volume_slider->maximum()));
+    SetVolumeIndicatorText(ui->volume_slider->sliderPosition());
 
     int selection;
     if (Settings::values.enable_dsp_lle) {
@@ -59,9 +80,14 @@ void ConfigureAudio::setConfiguration() {
         selection = 0;
     }
     ui->emulation_combo_box->setCurrentIndex(selection);
+
+    int index = static_cast<int>(Settings::values.mic_input_type);
+    ui->input_type_combo_box->setCurrentIndex(index);
+
+    UpdateAudioInputDevices(index);
 }
 
-void ConfigureAudio::setOutputSinkFromSinkID() {
+void ConfigureAudio::SetOutputSinkFromSinkID() {
     int new_sink_index = 0;
 
     const QString sink_id = QString::fromStdString(Settings::values.sink_id);
@@ -75,7 +101,7 @@ void ConfigureAudio::setOutputSinkFromSinkID() {
     ui->output_sink_combo_box->setCurrentIndex(new_sink_index);
 }
 
-void ConfigureAudio::setAudioDeviceFromDeviceID() {
+void ConfigureAudio::SetAudioDeviceFromDeviceID() {
     int new_device_index = -1;
 
     const QString device_id = QString::fromStdString(Settings::values.audio_device_id);
@@ -89,11 +115,11 @@ void ConfigureAudio::setAudioDeviceFromDeviceID() {
     ui->audio_device_combo_box->setCurrentIndex(new_device_index);
 }
 
-void ConfigureAudio::setVolumeIndicatorText(int percentage) {
+void ConfigureAudio::SetVolumeIndicatorText(int percentage) {
     ui->volume_indicator->setText(tr("%1%", "Volume percentage (e.g. 50%)").arg(percentage));
 }
 
-void ConfigureAudio::applyConfiguration() {
+void ConfigureAudio::ApplyConfiguration() {
     Settings::values.sink_id =
         ui->output_sink_combo_box->itemText(ui->output_sink_combo_box->currentIndex())
             .toStdString();
@@ -105,11 +131,19 @@ void ConfigureAudio::applyConfiguration() {
         static_cast<float>(ui->volume_slider->sliderPosition()) / ui->volume_slider->maximum();
     Settings::values.enable_dsp_lle = ui->emulation_combo_box->currentIndex() != 0;
     Settings::values.enable_dsp_lle_multithread = ui->emulation_combo_box->currentIndex() == 2;
+    Settings::values.mic_input_type =
+        static_cast<Settings::MicInputType>(ui->input_type_combo_box->currentIndex());
+
+    if (ui->input_device_combo_box->currentIndex() == DEFAULT_INPUT_DEVICE_INDEX) {
+        Settings::values.mic_input_device = Frontend::Mic::default_device_name;
+    } else {
+        Settings::values.mic_input_device = ui->input_device_combo_box->currentText().toStdString();
+    }
 }
 
-void ConfigureAudio::updateAudioDevices(int sink_index) {
+void ConfigureAudio::UpdateAudioOutputDevices(int sink_index) {
     ui->audio_device_combo_box->clear();
-    ui->audio_device_combo_box->addItem(AudioCore::auto_device_name);
+    ui->audio_device_combo_box->addItem(QString::fromUtf8(AudioCore::auto_device_name));
 
     const std::string sink_id = ui->output_sink_combo_box->itemText(sink_index).toStdString();
     for (const auto& device : AudioCore::GetDeviceListForSink(sink_id)) {
@@ -117,6 +151,18 @@ void ConfigureAudio::updateAudioDevices(int sink_index) {
     }
 }
 
-void ConfigureAudio::retranslateUi() {
+void ConfigureAudio::UpdateAudioInputDevices(int index) {
+#if defined(__APPLE__)
+    if (index == 1) {
+        AppleAuthorization::CheckAuthorizationForMicrophone();
+    }
+#endif
+    if (Settings::values.mic_input_device != Frontend::Mic::default_device_name) {
+        ui->input_device_combo_box->setCurrentText(
+            QString::fromStdString(Settings::values.mic_input_device));
+    }
+}
+
+void ConfigureAudio::RetranslateUI() {
     ui->retranslateUi(this);
 }

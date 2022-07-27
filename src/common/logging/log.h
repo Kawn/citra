@@ -4,10 +4,20 @@
 
 #pragma once
 
+#include <array>
 #include <fmt/format.h>
 #include "common/common_types.h"
 
 namespace Log {
+
+// trims up to and including the last of ../, ..\, src/, src\ in a string
+inline const char* TrimSourcePath(std::string_view source) {
+    const auto rfind = [source](const std::string_view match) {
+        return source.rfind(match) == source.npos ? 0 : (source.rfind(match) + match.size());
+    };
+    auto idx = std::max({rfind("src/"), rfind("src\\"), rfind("../"), rfind("..\\")});
+    return source.data() + idx;
+}
 
 /// Specifies the severity or level of detail of the log message.
 enum class Level : u8 {
@@ -82,6 +92,7 @@ enum class Class : ClassType {
     Service_SOC,       ///< The SOC (Socket) service
     Service_IR,        ///< The IR service
     Service_Y2R,       ///< The Y2R (YUV to RGB conversion) service
+    Service_PS,        ///< The PS (Process) service
     HW,                ///< Low-level hardware emulation
     HW_Memory,         ///< Memory-map and address translation
     HW_LCD,            ///< LCD register emulation
@@ -92,7 +103,7 @@ enum class Class : ClassType {
     Render_Software,   ///< Software renderer backend
     Render_OpenGL,     ///< OpenGL backend
     Audio,             ///< Audio emulation
-    Audio_DSP,         ///< The HLE implementation of the DSP
+    Audio_DSP,         ///< The HLE and LLE implementations of the DSP
     Audio_Sink,        ///< Emulator audio output backend
     Loader,            ///< ROM loader
     Input,             ///< Input emulation
@@ -103,6 +114,47 @@ enum class Class : ClassType {
     Count              ///< Total number of logging classes
 };
 
+/**
+ * Implements a log message filter which allows different log classes to have different minimum
+ * severity levels. The filter can be changed at runtime and can be parsed from a string to allow
+ * editing via the interface or loading from a configuration file.
+ */
+class Filter {
+public:
+    /// Initializes the filter with all classes having `default_level` as the minimum level.
+    explicit Filter(Level default_level = Level::Info);
+
+    /// Resets the filter so that all classes have `level` as the minimum displayed level.
+    void ResetAll(Level level);
+    /// Sets the minimum level of `log_class` (and not of its subclasses) to `level`.
+    void SetClassLevel(Class log_class, Level level);
+
+    /**
+     * Parses a filter string and applies it to this filter.
+     *
+     * A filter string consists of a space-separated list of filter rules, each of the format
+     * `<class>:<level>`. `<class>` is a log class name, with subclasses separated using periods.
+     * `*` is allowed as a class name and will reset all filters to the specified level. `<level>`
+     * a severity level name which will be set as the minimum logging level of the matched classes.
+     * Rules are applied left to right, with each rule overriding previous ones in the sequence.
+     *
+     * A few examples of filter rules:
+     *  - `*:Info` -- Resets the level of all classes to Info.
+     *  - `Service:Info` -- Sets the level of Service to Info.
+     *  - `Service.FS:Trace` -- Sets the level of the Service.FS class to Trace.
+     */
+    void ParseFilterString(std::string_view filter_view);
+
+    /// Matches class/level combination against the filter, returning true if it passed.
+    bool CheckMessage(Class log_class, Level level) const;
+
+private:
+    std::array<Level, static_cast<std::size_t>(Class::Count)> class_levels;
+};
+extern Filter filter;
+
+void SetGlobalFilter(const Filter& f);
+
 /// Logs a message to the global logger, using fmt
 void FmtLogMessageImpl(Class log_class, Level log_level, const char* filename,
                        unsigned int line_num, const char* function, const char* format,
@@ -111,6 +163,9 @@ void FmtLogMessageImpl(Class log_class, Level log_level, const char* filename,
 template <typename... Args>
 void FmtLogMessage(Class log_class, Level log_level, const char* filename, unsigned int line_num,
                    const char* function, const char* format, const Args&... args) {
+    if (!filter.CheckMessage(log_class, log_level))
+        return;
+
     FmtLogMessageImpl(log_class, log_level, filename, line_num, function, format,
                       fmt::make_format_args(args...));
 }
@@ -119,28 +174,29 @@ void FmtLogMessage(Class log_class, Level log_level, const char* filename, unsig
 
 // Define the fmt lib macros
 #define LOG_GENERIC(log_class, log_level, ...)                                                     \
-    ::Log::FmtLogMessage(log_class, log_level, __FILE__, __LINE__, __func__, __VA_ARGS__)
+    ::Log::FmtLogMessage(log_class, log_level, ::Log::TrimSourcePath(__FILE__), __LINE__,          \
+                         __func__, __VA_ARGS__)
 
 #ifdef _DEBUG
 #define LOG_TRACE(log_class, ...)                                                                  \
-    ::Log::FmtLogMessage(::Log::Class::log_class, ::Log::Level::Trace, __FILE__, __LINE__,         \
-                         __func__, __VA_ARGS__)
+    ::Log::FmtLogMessage(::Log::Class::log_class, ::Log::Level::Trace,                             \
+                         ::Log::TrimSourcePath(__FILE__), __LINE__, __func__, __VA_ARGS__)
 #else
 #define LOG_TRACE(log_class, fmt, ...) (void(0))
 #endif
 
 #define LOG_DEBUG(log_class, ...)                                                                  \
-    ::Log::FmtLogMessage(::Log::Class::log_class, ::Log::Level::Debug, __FILE__, __LINE__,         \
-                         __func__, __VA_ARGS__)
+    ::Log::FmtLogMessage(::Log::Class::log_class, ::Log::Level::Debug,                             \
+                         ::Log::TrimSourcePath(__FILE__), __LINE__, __func__, __VA_ARGS__)
 #define LOG_INFO(log_class, ...)                                                                   \
-    ::Log::FmtLogMessage(::Log::Class::log_class, ::Log::Level::Info, __FILE__, __LINE__,          \
-                         __func__, __VA_ARGS__)
+    ::Log::FmtLogMessage(::Log::Class::log_class, ::Log::Level::Info,                              \
+                         ::Log::TrimSourcePath(__FILE__), __LINE__, __func__, __VA_ARGS__)
 #define LOG_WARNING(log_class, ...)                                                                \
-    ::Log::FmtLogMessage(::Log::Class::log_class, ::Log::Level::Warning, __FILE__, __LINE__,       \
-                         __func__, __VA_ARGS__)
+    ::Log::FmtLogMessage(::Log::Class::log_class, ::Log::Level::Warning,                           \
+                         ::Log::TrimSourcePath(__FILE__), __LINE__, __func__, __VA_ARGS__)
 #define LOG_ERROR(log_class, ...)                                                                  \
-    ::Log::FmtLogMessage(::Log::Class::log_class, ::Log::Level::Error, __FILE__, __LINE__,         \
-                         __func__, __VA_ARGS__)
+    ::Log::FmtLogMessage(::Log::Class::log_class, ::Log::Level::Error,                             \
+                         ::Log::TrimSourcePath(__FILE__), __LINE__, __func__, __VA_ARGS__)
 #define LOG_CRITICAL(log_class, ...)                                                               \
-    ::Log::FmtLogMessage(::Log::Class::log_class, ::Log::Level::Critical, __FILE__, __LINE__,      \
-                         __func__, __VA_ARGS__)
+    ::Log::FmtLogMessage(::Log::Class::log_class, ::Log::Level::Critical,                          \
+                         ::Log::TrimSourcePath(__FILE__), __LINE__, __func__, __VA_ARGS__)

@@ -3,9 +3,11 @@
 // Refer to the license.txt file included.
 
 #include <memory>
+#include "common/archives.h"
 #include "common/logging/log.h"
 #include "core/settings.h"
 #include "video_core/pica.h"
+#include "video_core/pica_state.h"
 #include "video_core/renderer_base.h"
 #include "video_core/renderer_opengl/gl_vars.h"
 #include "video_core/renderer_opengl/renderer_opengl.h"
@@ -21,9 +23,13 @@ std::unique_ptr<RendererBase> g_renderer; ///< Renderer plugin
 std::atomic<bool> g_hw_renderer_enabled;
 std::atomic<bool> g_shader_jit_enabled;
 std::atomic<bool> g_hw_shader_enabled;
-std::atomic<bool> g_hw_shader_accurate_gs;
+std::atomic<bool> g_separable_shader_enabled;
 std::atomic<bool> g_hw_shader_accurate_mul;
+std::atomic<bool> g_use_disk_shader_cache;
 std::atomic<bool> g_renderer_bg_color_update_requested;
+std::atomic<bool> g_renderer_sampler_update_requested;
+std::atomic<bool> g_renderer_shader_update_requested;
+std::atomic<bool> g_texture_filter_update_requested;
 // Screenshot
 std::atomic<bool> g_renderer_screenshot_requested;
 void* g_screenshot_bits;
@@ -33,16 +39,16 @@ Layout::FramebufferLayout g_screenshot_framebuffer_layout;
 Memory::MemorySystem* g_memory;
 
 /// Initialize the video core
-Core::System::ResultStatus Init(EmuWindow& emu_window, Memory::MemorySystem& memory) {
+ResultStatus Init(Frontend::EmuWindow& emu_window, Memory::MemorySystem& memory) {
     g_memory = &memory;
     Pica::Init();
 
     OpenGL::GLES = Settings::values.use_gles;
 
     g_renderer = std::make_unique<OpenGL::RendererOpenGL>(emu_window);
-    Core::System::ResultStatus result = g_renderer->Init();
+    ResultStatus result = g_renderer->Init();
 
-    if (result != Core::System::ResultStatus::Success) {
+    if (result != ResultStatus::Success) {
         LOG_ERROR(Render, "initialization failed !");
     } else {
         LOG_DEBUG(Render, "initialized OK");
@@ -55,6 +61,7 @@ Core::System::ResultStatus Init(EmuWindow& emu_window, Memory::MemorySystem& mem
 void Shutdown() {
     Pica::Shutdown();
 
+    g_renderer->ShutDown();
     g_renderer.reset();
 
     LOG_DEBUG(Render, "shutdown OK");
@@ -83,4 +90,11 @@ u16 GetResolutionScaleFactor() {
     }
 }
 
+template <class Archive>
+void serialize(Archive& ar, const unsigned int) {
+    ar& Pica::g_state;
+}
+
 } // namespace VideoCore
+
+SERIALIZE_IMPL(VideoCore)

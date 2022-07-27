@@ -5,7 +5,7 @@
 #pragma once
 
 #include <QWidget>
-#include "core/announce_multiplayer_session.h"
+#include "network/announce_multiplayer_session.h"
 #include "network/network.h"
 
 class QStandardItemModel;
@@ -38,6 +38,20 @@ public:
 
     void retranslateUi();
 
+    /**
+     * Whether a public room is being hosted or not.
+     * When this is true, Web Services configuration should be disabled.
+     */
+    bool IsHostingPublicRoom() const;
+
+    void UpdateCredentials();
+
+    /**
+     * Updates the multiplayer dialogs with a new game list model.
+     * This model should be the original model of the game list.
+     */
+    void UpdateGameList(QStandardItemModel* game_list);
+
 public slots:
     void OnNetworkStateChanged(const Network::RoomMember::State& state);
     void OnNetworkError(const Network::RoomMember::Error& error);
@@ -66,7 +80,7 @@ private:
     QStandardItemModel* game_list_model = nullptr;
     QAction* leave_room;
     QAction* show_room;
-    std::shared_ptr<Core::AnnounceMultiplayerSession> announce_multiplayer_session;
+    std::shared_ptr<Network::AnnounceMultiplayerSession> announce_multiplayer_session;
     Network::RoomMember::State current_state = Network::RoomMember::State::Uninitialized;
     bool has_mod_perms = false;
     Network::RoomMember::CallbackHandle<Network::RoomMember::State> state_callback_handle;

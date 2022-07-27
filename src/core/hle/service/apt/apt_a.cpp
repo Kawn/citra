@@ -2,12 +2,13 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include "common/archives.h"
 #include "core/hle/service/apt/apt_a.h"
 
 namespace Service::APT {
 
 APT_A::APT_A(std::shared_ptr<Module> apt)
-    : Module::Interface(std::move(apt), "APT:A", MaxAPTSessions) {
+    : Module::APTInterface(std::move(apt), "APT:A", MaxAPTSessions) {
     static const FunctionInfo functions[] = {
         {0x00010040, &APT_A::GetLockHandle, "GetLockHandle"},
         {0x00020080, &APT_A::Initialize, "Initialize"},
@@ -61,7 +62,7 @@ APT_A::APT_A(std::shared_ptr<Module> apt)
         {0x00320084, &APT_A::DoApplicationJump, "DoApplicationJump"},
         {0x00330000, &APT_A::GetProgramIdOnApplicationJump, "GetProgramIdOnApplicationJump"},
         {0x00340084, nullptr, "SendDeliverArg"},
-        {0x00350080, nullptr, "ReceiveDeliverArg"},
+        {0x00350080, &APT_A::ReceiveDeliverArg, "ReceiveDeliverArg"},
         {0x00360040, nullptr, "LoadSysMenuArg"},
         {0x00370042, nullptr, "StoreSysMenuArg"},
         {0x00380040, nullptr, "PreloadResidentApplet"},
@@ -77,7 +78,7 @@ APT_A::APT_A(std::shared_ptr<Module> apt)
         {0x00420080, nullptr, "SleepSystem"},
         {0x00430040, &APT_A::NotifyToWait, "NotifyToWait"},
         {0x00440000, &APT_A::GetSharedFont, "GetSharedFont"},
-        {0x00450040, nullptr, "GetWirelessRebootInfo"},
+        {0x00450040, &APT_A::GetWirelessRebootInfo, "GetWirelessRebootInfo"},
         {0x00460104, &APT_A::Wrap, "Wrap"},
         {0x00470104, &APT_A::Unwrap, "Unwrap"},
         {0x00480100, nullptr, "GetProgramInfo"},
@@ -98,10 +99,13 @@ APT_A::APT_A(std::shared_ptr<Module> apt)
         {0x00580002, nullptr, "GetProgramID"},
         {0x01010000, &APT_A::CheckNew3DSApp, "CheckNew3DSApp"},
         {0x01020000, &APT_A::CheckNew3DS, "CheckNew3DS"},
+        {0x01030000, &APT_A::Unknown0x0103, "Unknown0x0103"},
         {0x01040000, nullptr, "IsStandardMemoryLayout"},
-        {0x01050100, nullptr, "IsTitleAllowed"},
+        {0x01050100, &APT_A::IsTitleAllowed, "IsTitleAllowed"},
     };
     RegisterHandlers(functions);
 }
 
 } // namespace Service::APT
+
+SERIALIZE_EXPORT_IMPL(Service::APT::APT_A)

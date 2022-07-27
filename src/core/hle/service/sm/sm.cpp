@@ -32,7 +32,7 @@ void ServiceManager::InstallInterfaces(Core::System& system) {
     system.ServiceManager().srv_interface = srv;
 }
 
-ResultVal<Kernel::SharedPtr<Kernel::ServerPort>> ServiceManager::RegisterService(
+ResultVal<std::shared_ptr<Kernel::ServerPort>> ServiceManager::RegisterService(
     std::string name, unsigned int max_sessions) {
 
     CASCADE_CODE(ValidateServiceName(name));
@@ -42,11 +42,12 @@ ResultVal<Kernel::SharedPtr<Kernel::ServerPort>> ServiceManager::RegisterService
 
     auto [server_port, client_port] = system.Kernel().CreatePortPair(max_sessions, name);
 
+    registered_services_inverse.emplace(client_port->GetObjectId(), name);
     registered_services.emplace(std::move(name), std::move(client_port));
     return MakeResult(std::move(server_port));
 }
 
-ResultVal<Kernel::SharedPtr<Kernel::ClientPort>> ServiceManager::GetServicePort(
+ResultVal<std::shared_ptr<Kernel::ClientPort>> ServiceManager::GetServicePort(
     const std::string& name) {
 
     CASCADE_CODE(ValidateServiceName(name));
@@ -58,11 +59,19 @@ ResultVal<Kernel::SharedPtr<Kernel::ClientPort>> ServiceManager::GetServicePort(
     return MakeResult(it->second);
 }
 
-ResultVal<Kernel::SharedPtr<Kernel::ClientSession>> ServiceManager::ConnectToService(
+ResultVal<std::shared_ptr<Kernel::ClientSession>> ServiceManager::ConnectToService(
     const std::string& name) {
 
     CASCADE_RESULT(auto client_port, GetServicePort(name));
     return client_port->Connect();
+}
+
+std::string ServiceManager::GetServiceNameByPortId(u32 port) const {
+    if (registered_services_inverse.count(port)) {
+        return registered_services_inverse.at(port);
+    }
+
+    return "";
 }
 
 } // namespace Service::SM

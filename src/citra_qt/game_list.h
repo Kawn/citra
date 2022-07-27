@@ -6,10 +6,11 @@
 
 #include <QMenu>
 #include <QString>
+#include <QVector>
 #include <QWidget>
 #include "citra_qt/compatibility_list.h"
 #include "common/common_types.h"
-#include "ui_settings.h"
+#include "uisettings.h"
 
 class GameListWorker;
 class GameListDir;
@@ -28,7 +29,15 @@ class QTreeView;
 class QToolButton;
 class QVBoxLayout;
 
-enum class GameListOpenTarget { SAVE_DATA = 0, EXT_DATA = 1, APPLICATION = 2, UPDATE_DATA = 3 };
+enum class GameListOpenTarget {
+    SAVE_DATA = 0,
+    EXT_DATA = 1,
+    APPLICATION = 2,
+    UPDATE_DATA = 3,
+    TEXTURE_DUMP = 4,
+    TEXTURE_LOAD = 5,
+    MODS = 6,
+};
 
 class GameList : public QWidget {
     Q_OBJECT
@@ -46,55 +55,57 @@ public:
     explicit GameList(GMainWindow* parent = nullptr);
     ~GameList() override;
 
-    QString getLastFilterResultItem();
-    void clearFilter();
-    void setFilterFocus();
-    void setFilterVisible(bool visibility);
-    void setDirectoryWatcherEnabled(bool enabled);
-    bool isEmpty();
+    QString GetLastFilterResultItem() const;
+    void ClearFilter();
+    void SetFilterFocus();
+    void SetFilterVisible(bool visibility);
+    void SetDirectoryWatcherEnabled(bool enabled);
+    bool IsEmpty() const;
 
     void LoadCompatibilityList();
-    void PopulateAsync(QList<UISettings::GameDir>& game_dirs);
+    void PopulateAsync(QVector<UISettings::GameDir>& game_dirs);
 
     void SaveInterfaceLayout();
     void LoadInterfaceLayout();
 
     QStandardItemModel* GetModel() const;
 
-    QString FindGameByProgramID(u64 program_id);
+    QString FindGameByProgramID(u64 program_id, int role);
 
     void RefreshGameDirectory();
 
     static const QStringList supported_file_extensions;
 
 signals:
-    void GameChosen(QString game_path);
+    void GameChosen(const QString& game_path);
     void ShouldCancelWorker();
     void OpenFolderRequested(u64 program_id, GameListOpenTarget target);
     void NavigateToGamedbEntryRequested(u64 program_id,
                                         const CompatibilityList& compatibility_list);
-    void OpenDirectory(QString directory);
+    void DumpRomFSRequested(QString game_path, u64 program_id);
+    void OpenDirectory(const QString& directory);
     void AddDirectory();
     void ShowList(bool show);
+    void PopulatingCompleted();
 
 private slots:
-    void onItemExpanded(const QModelIndex& item);
-    void onTextChanged(const QString& newText);
-    void onFilterCloseClicked();
-    void onUpdateThemedIcons();
+    void OnItemExpanded(const QModelIndex& item);
+    void OnTextChanged(const QString& new_text);
+    void OnFilterCloseClicked();
+    void OnUpdateThemedIcons();
 
 private:
     void AddDirEntry(GameListDir* entry_items);
     void AddEntry(const QList<QStandardItem*>& entry_items, GameListDir* parent);
     void ValidateEntry(const QModelIndex& item);
-    void DonePopulating(QStringList watch_list);
+    void DonePopulating(const QStringList& watch_list);
 
     void PopupContextMenu(const QPoint& menu_location);
     void AddGamePopup(QMenu& context_menu, const QString& path, u64 program_id, u64 extdata_id);
     void AddCustomDirPopup(QMenu& context_menu, QModelIndex selected);
     void AddPermDirPopup(QMenu& context_menu, QModelIndex selected);
 
-    QString FindGameByProgramID(QStandardItem* current_item, u64 program_id);
+    QString FindGameByProgramID(QStandardItem* current_item, u64 program_id, int role);
 
     GameListSearchField* search_field;
     GMainWindow* main_window = nullptr;
@@ -126,7 +137,6 @@ protected:
     void mouseDoubleClickEvent(QMouseEvent* event) override;
 
 private:
-    GMainWindow* main_window = nullptr;
     QVBoxLayout* layout = nullptr;
     QLabel* image = nullptr;
     QLabel* text = nullptr;

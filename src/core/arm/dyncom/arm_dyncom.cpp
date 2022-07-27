@@ -69,8 +69,9 @@ private:
 };
 
 ARM_DynCom::ARM_DynCom(Core::System* system, Memory::MemorySystem& memory,
-                       PrivilegeMode initial_mode)
-    : system(system) {
+                       PrivilegeMode initial_mode, u32 id,
+                       std::shared_ptr<Core::Timing::Timer> timer)
+    : ARM_Interface(id, timer), system(system) {
     state = std::make_unique<ARMul_State>(system, memory, initial_mode);
 }
 
@@ -78,7 +79,7 @@ ARM_DynCom::~ARM_DynCom() {}
 
 void ARM_DynCom::Run() {
     DEBUG_ASSERT(system != nullptr);
-    ExecuteInstructions(std::max<s64>(system->CoreTiming().GetDowncount(), 0));
+    ExecuteInstructions(std::max<s64>(timer->GetDowncount(), 0));
 }
 
 void ARM_DynCom::Step() {
@@ -94,9 +95,15 @@ void ARM_DynCom::InvalidateCacheRange(u32, std::size_t) {
     ClearInstructionCache();
 }
 
-void ARM_DynCom::PageTableChanged() {
+void ARM_DynCom::SetPageTable(const std::shared_ptr<Memory::PageTable>& page_table) {
     ClearInstructionCache();
 }
+
+std::shared_ptr<Memory::PageTable> ARM_DynCom::GetPageTable() const {
+    return nullptr;
+}
+
+void ARM_DynCom::PurgeState() {}
 
 void ARM_DynCom::SetPC(u32 pc) {
     state->Reg[15] = pc;
@@ -138,7 +145,7 @@ void ARM_DynCom::SetCPSR(u32 cpsr) {
     state->Cpsr = cpsr;
 }
 
-u32 ARM_DynCom::GetCP15Register(CP15Register reg) {
+u32 ARM_DynCom::GetCP15Register(CP15Register reg) const {
     return state->CP15[reg];
 }
 
@@ -150,7 +157,7 @@ void ARM_DynCom::ExecuteInstructions(u64 num_instructions) {
     state->NumInstrsToExecute = num_instructions;
     unsigned ticks_executed = InterpreterMainLoop(state.get());
     if (system != nullptr) {
-        system->CoreTiming().AddTicks(ticks_executed);
+        timer->AddTicks(ticks_executed);
     }
     state->ServeBreak();
 }

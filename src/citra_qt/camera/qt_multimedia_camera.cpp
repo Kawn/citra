@@ -10,11 +10,14 @@
 #include "citra_qt/camera/qt_multimedia_camera.h"
 #include "citra_qt/main.h"
 
+#if defined(__APPLE__)
+#include "citra_qt/macos_authorization.h"
+#endif
+
 namespace Camera {
 
-QList<QVideoFrame::PixelFormat> QtCameraSurface::supportedPixelFormats(
-    QAbstractVideoBuffer::HandleType handleType) const {
-    Q_UNUSED(handleType);
+QList<QVideoFrame::PixelFormat> QtCameraSurface::supportedPixelFormats([
+    [maybe_unused]] QAbstractVideoBuffer::HandleType handleType) const {
     return QList<QVideoFrame::PixelFormat>()
            << QVideoFrame::Format_ARGB32 << QVideoFrame::Format_ARGB32_Premultiplied
            << QVideoFrame::Format_RGB32 << QVideoFrame::Format_RGB24 << QVideoFrame::Format_RGB565
@@ -121,9 +124,8 @@ std::unordered_map<std::string, std::shared_ptr<QtMultimediaCameraHandler>>
     QtMultimediaCameraHandler::loaded;
 
 void QtMultimediaCameraHandler::Init() {
-    for (auto& handler : handlers) {
-        handler = std::make_shared<QtMultimediaCameraHandler>();
-    }
+    std::generate(std::begin(handlers), std::end(handlers),
+                  std::make_shared<QtMultimediaCameraHandler>);
 }
 
 std::shared_ptr<QtMultimediaCameraHandler> QtMultimediaCameraHandler::GetHandler(
@@ -131,7 +133,7 @@ std::shared_ptr<QtMultimediaCameraHandler> QtMultimediaCameraHandler::GetHandler
     if (loaded.count(camera_name)) {
         return loaded.at(camera_name);
     }
-    for (int i = 0; i < handlers.size(); i++) {
+    for (std::size_t i = 0; i < handlers.size(); i++) {
         if (!status[i]) {
             LOG_INFO(Service_CAM, "Successfully got handler {}", i);
             status[i] = true;
@@ -145,7 +147,7 @@ std::shared_ptr<QtMultimediaCameraHandler> QtMultimediaCameraHandler::GetHandler
 
 void QtMultimediaCameraHandler::ReleaseHandler(
     const std::shared_ptr<Camera::QtMultimediaCameraHandler>& handler) {
-    for (int i = 0; i < handlers.size(); i++) {
+    for (std::size_t i = 0; i < handlers.size(); i++) {
         if (handlers[i] == handler) {
             LOG_INFO(Service_CAM, "Successfully released handler {}", i);
             status[i] = false;
@@ -188,6 +190,12 @@ void QtMultimediaCameraHandler::StopCamera() {
 }
 
 void QtMultimediaCameraHandler::StartCamera() {
+#if defined(__APPLE__)
+    if (!AppleAuthorization::CheckAuthorizationForCamera()) {
+        LOG_ERROR(Service_CAM, "Unable to start camera due to lack of authorization");
+        return;
+    }
+#endif
     camera->setViewfinderSettings(settings);
     camera->start();
     started = true;
@@ -217,7 +225,7 @@ void QtMultimediaCameraHandler::ResumeCameras() {
 void QtMultimediaCameraHandler::ReleaseHandlers() {
     StopCameras();
     LOG_INFO(Service_CAM, "Releasing all handlers");
-    for (int i = 0; i < handlers.size(); i++) {
+    for (std::size_t i = 0; i < handlers.size(); i++) {
         status[i] = false;
         handlers[i]->started = false;
     }

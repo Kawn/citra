@@ -53,7 +53,7 @@ public:
     mutable std::mutex ban_list_mutex; ///< Mutex for the ban lists
 
     RoomImpl()
-        : random_gen(std::random_device()()), NintendoOUI{0x00, 0x1F, 0x32, 0x00, 0x00, 0x00} {}
+        : NintendoOUI{0x00, 0x1F, 0x32, 0x00, 0x00, 0x00}, random_gen(std::random_device()()) {}
 
     /// Thread that receives and dispatches network packets
     std::unique_ptr<std::thread> room_thread;
@@ -196,7 +196,7 @@ public:
      * Sends a system message to all the connected clients.
      */
     void SendStatusMessage(StatusMessageTypes type, const std::string& nickname,
-                           const std::string& username);
+                           const std::string& username, const std::string& ip);
 
     /**
      * Sends the information about the room, along with the list of members
@@ -251,7 +251,7 @@ public:
 void Room::RoomImpl::ServerLoop() {
     while (state != State::Closed) {
         ENetEvent event;
-        if (enet_host_service(server, &event, 50) > 0) {
+        if (enet_host_service(server, &event, 16) > 0) {
             switch (event.type) {
             case ENET_EVENT_TYPE_RECEIVE:
                 switch (event.packet->data[0]) {
@@ -302,7 +302,7 @@ void Room::RoomImpl::StartLoop() {
 
 void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
     {
-        std::lock_guard<std::mutex> lock(member_mutex);
+        std::lock_guard lock(member_mutex);
         if (members.size() >= room_information.member_slots) {
             SendRoomIsFull(event->peer);
             return;
@@ -369,13 +369,14 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
 
     std::string uid;
     {
-        std::lock_guard<std::mutex> lock(verify_UID_mutex);
+        std::lock_guard lock(verify_UID_mutex);
         uid = verify_UID;
     }
     member.user_data = verify_backend->LoadUserData(uid, token);
 
+    std::string ip;
     {
-        std::lock_guard<std::mutex> lock(ban_list_mutex);
+        std::lock_guard lock(ban_list_mutex);
 
         // Check username ban
         if (!member.user_data.username.empty() &&
@@ -389,7 +390,7 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
         // Check IP ban
         char ip_raw[256];
         enet_address_get_host_ip(&event->peer->address, ip_raw, sizeof(ip_raw) - 1);
-        std::string ip = ip_raw;
+        ip = ip_raw;
 
         if (std::find(ip_ban_list.begin(), ip_ban_list.end(), ip) != ip_ban_list.end()) {
             SendUserBanned(event->peer);
@@ -398,10 +399,10 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
     }
 
     // Notify everyone that the user has joined.
-    SendStatusMessage(IdMemberJoin, member.nickname, member.user_data.username);
+    SendStatusMessage(IdMemberJoin, member.nickname, member.user_data.username, ip);
 
     {
-        std::lock_guard<std::mutex> lock(member_mutex);
+        std::lock_guard lock(member_mutex);
         members.push_back(std::move(member));
     }
 
@@ -427,9 +428,9 @@ void Room::RoomImpl::HandleModKickPacket(const ENetEvent* event) {
     std::string nickname;
     packet >> nickname;
 
-    std::string username;
+    std::string username, ip;
     {
-        std::lock_guard<std::mutex> lock(member_mutex);
+        std::lock_guard lock(member_mutex);
         const auto target_member =
             std::find_if(members.begin(), members.end(),
                          [&nickname](const auto& member) { return member.nickname == nickname; });
@@ -443,12 +444,16 @@ void Room::RoomImpl::HandleModKickPacket(const ENetEvent* event) {
 
         username = target_member->user_data.username;
 
+        char ip_raw[256];
+        enet_address_get_host_ip(&target_member->peer->address, ip_raw, sizeof(ip_raw) - 1);
+        ip = ip_raw;
+
         enet_peer_disconnect(target_member->peer, 0);
         members.erase(target_member);
     }
 
     // Announce the change to all clients.
-    SendStatusMessage(IdMemberKicked, nickname, username);
+    SendStatusMessage(IdMemberKicked, nickname, username, ip);
     BroadcastRoomInformation();
 }
 
@@ -465,11 +470,9 @@ void Room::RoomImpl::HandleModBanPacket(const ENetEvent* event) {
     std::string nickname;
     packet >> nickname;
 
-    std::string username;
-    std::string ip;
-
+    std::string username, ip;
     {
-        std::lock_guard<std::mutex> lock(member_mutex);
+        std::lock_guard lock(member_mutex);
         const auto target_member =
             std::find_if(members.begin(), members.end(),
                          [&nickname](const auto& member) { return member.nickname == nickname; });
@@ -493,7 +496,7 @@ void Room::RoomImpl::HandleModBanPacket(const ENetEvent* event) {
     }
 
     {
-        std::lock_guard<std::mutex> lock(ban_list_mutex);
+        std::lock_guard lock(ban_list_mutex);
 
         if (!username.empty()) {
             // Ban the forum username
@@ -511,7 +514,7 @@ void Room::RoomImpl::HandleModBanPacket(const ENetEvent* event) {
     }
 
     // Announce the change to all clients.
-    SendStatusMessage(IdMemberBanned, nickname, username);
+    SendStatusMessage(IdMemberBanned, nickname, username, ip);
     BroadcastRoomInformation();
 }
 
@@ -530,7 +533,7 @@ void Room::RoomImpl::HandleModUnbanPacket(const ENetEvent* event) {
 
     bool unbanned = false;
     {
-        std::lock_guard<std::mutex> lock(ban_list_mutex);
+        std::lock_guard lock(ban_list_mutex);
 
         auto it = std::find(username_ban_list.begin(), username_ban_list.end(), address);
         if (it != username_ban_list.end()) {
@@ -546,7 +549,7 @@ void Room::RoomImpl::HandleModUnbanPacket(const ENetEvent* event) {
     }
 
     if (unbanned) {
-        SendStatusMessage(IdAddressUnbanned, address, "");
+        SendStatusMessage(IdAddressUnbanned, address, "", "");
     } else {
         SendModNoSuchUser(event->peer);
     }
@@ -568,28 +571,28 @@ bool Room::RoomImpl::IsValidNickname(const std::string& nickname) const {
     if (!std::regex_match(nickname, nickname_regex))
         return false;
 
-    std::lock_guard<std::mutex> lock(member_mutex);
+    std::lock_guard lock(member_mutex);
     return std::all_of(members.begin(), members.end(),
                        [&nickname](const auto& member) { return member.nickname != nickname; });
 }
 
 bool Room::RoomImpl::IsValidMacAddress(const MacAddress& address) const {
     // A MAC address is valid if it is not already taken by anybody else in the room.
-    std::lock_guard<std::mutex> lock(member_mutex);
+    std::lock_guard lock(member_mutex);
     return std::all_of(members.begin(), members.end(),
                        [&address](const auto& member) { return member.mac_address != address; });
 }
 
 bool Room::RoomImpl::IsValidConsoleId(const std::string& console_id_hash) const {
     // A Console ID is valid if it is not already taken by anybody else in the room.
-    std::lock_guard<std::mutex> lock(member_mutex);
+    std::lock_guard lock(member_mutex);
     return std::all_of(members.begin(), members.end(), [&console_id_hash](const auto& member) {
         return member.console_id_hash != console_id_hash;
     });
 }
 
 bool Room::RoomImpl::HasModPermission(const ENetPeer* client) const {
-    std::lock_guard<std::mutex> lock(member_mutex);
+    std::lock_guard lock(member_mutex);
     const auto sending_member =
         std::find_if(members.begin(), members.end(),
                      [client](const auto& member) { return member.peer == client; });
@@ -734,7 +737,7 @@ void Room::RoomImpl::SendModBanListResponse(ENetPeer* client) {
     Packet packet;
     packet << static_cast<u8>(IdModBanListResponse);
     {
-        std::lock_guard<std::mutex> lock(ban_list_mutex);
+        std::lock_guard lock(ban_list_mutex);
         packet << username_ban_list;
         packet << ip_ban_list;
     }
@@ -748,7 +751,7 @@ void Room::RoomImpl::SendModBanListResponse(ENetPeer* client) {
 void Room::RoomImpl::SendCloseMessage() {
     Packet packet;
     packet << static_cast<u8>(IdCloseRoom);
-    std::lock_guard<std::mutex> lock(member_mutex);
+    std::lock_guard lock(member_mutex);
     if (!members.empty()) {
         ENetPacket* enet_packet =
             enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
@@ -763,13 +766,13 @@ void Room::RoomImpl::SendCloseMessage() {
 }
 
 void Room::RoomImpl::SendStatusMessage(StatusMessageTypes type, const std::string& nickname,
-                                       const std::string& username) {
+                                       const std::string& username, const std::string& ip) {
     Packet packet;
     packet << static_cast<u8>(IdStatusMessage);
     packet << static_cast<u8>(type);
     packet << nickname;
     packet << username;
-    std::lock_guard<std::mutex> lock(member_mutex);
+    std::lock_guard lock(member_mutex);
     if (!members.empty()) {
         ENetPacket* enet_packet =
             enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
@@ -778,6 +781,27 @@ void Room::RoomImpl::SendStatusMessage(StatusMessageTypes type, const std::strin
         }
     }
     enet_host_flush(server);
+
+    const std::string display_name =
+        username.empty() ? nickname : fmt::format("{} ({})", nickname, username);
+
+    switch (type) {
+    case IdMemberJoin:
+        LOG_INFO(Network, "[{}] {} has joined.", ip, display_name);
+        break;
+    case IdMemberLeave:
+        LOG_INFO(Network, "[{}] {} has left.", ip, display_name);
+        break;
+    case IdMemberKicked:
+        LOG_INFO(Network, "[{}] {} has been kicked.", ip, display_name);
+        break;
+    case IdMemberBanned:
+        LOG_INFO(Network, "[{}] {} has been banned.", ip, display_name);
+        break;
+    case IdAddressUnbanned:
+        LOG_INFO(Network, "{} has been unbanned.", display_name);
+        break;
+    }
 }
 
 void Room::RoomImpl::BroadcastRoomInformation() {
@@ -792,7 +816,7 @@ void Room::RoomImpl::BroadcastRoomInformation() {
 
     packet << static_cast<u32>(members.size());
     {
-        std::lock_guard<std::mutex> lock(member_mutex);
+        std::lock_guard lock(member_mutex);
         for (const auto& member : members) {
             packet << member.nickname;
             packet << member.mac_address;
@@ -838,7 +862,7 @@ void Room::RoomImpl::HandleWifiPacket(const ENetEvent* event) {
                                                  ENET_PACKET_FLAG_RELIABLE);
 
     if (destination_address == BroadcastMac) { // Send the data to everyone except the sender
-        std::lock_guard<std::mutex> lock(member_mutex);
+        std::lock_guard lock(member_mutex);
         bool sent_packet = false;
         for (const auto& member : members) {
             if (member.peer != event->peer) {
@@ -851,7 +875,7 @@ void Room::RoomImpl::HandleWifiPacket(const ENetEvent* event) {
             enet_packet_destroy(enet_packet);
         }
     } else { // Send the data only to the destination client
-        std::lock_guard<std::mutex> lock(member_mutex);
+        std::lock_guard lock(member_mutex);
         auto member = std::find_if(members.begin(), members.end(),
                                    [destination_address](const Member& member) -> bool {
                                        return member.mac_address == destination_address;
@@ -881,14 +905,14 @@ void Room::RoomImpl::HandleChatPacket(const ENetEvent* event) {
         return member.peer == event->peer;
     };
 
-    std::lock_guard<std::mutex> lock(member_mutex);
+    std::lock_guard lock(member_mutex);
     const auto sending_member = std::find_if(members.begin(), members.end(), CompareNetworkAddress);
     if (sending_member == members.end()) {
         return; // Received a chat message from a unknown sender
     }
 
     // Limit the size of chat messages to MaxMessageSize
-    message.resize(MaxMessageSize);
+    message.resize(std::min(static_cast<u32>(message.size()), MaxMessageSize));
 
     Packet out_packet;
     out_packet << static_cast<u8>(IdChatMessage);
@@ -911,6 +935,13 @@ void Room::RoomImpl::HandleChatPacket(const ENetEvent* event) {
     }
 
     enet_host_flush(server);
+
+    if (sending_member->user_data.username.empty()) {
+        LOG_INFO(Network, "{}: {}", sending_member->nickname, message);
+    } else {
+        LOG_INFO(Network, "{} ({}): {}", sending_member->nickname,
+                 sending_member->user_data.username, message);
+    }
 }
 
 void Room::RoomImpl::HandleGameNamePacket(const ENetEvent* event) {
@@ -923,13 +954,24 @@ void Room::RoomImpl::HandleGameNamePacket(const ENetEvent* event) {
     in_packet >> game_info.id;
 
     {
-        std::lock_guard<std::mutex> lock(member_mutex);
+        std::lock_guard lock(member_mutex);
         auto member =
             std::find_if(members.begin(), members.end(), [event](const Member& member) -> bool {
                 return member.peer == event->peer;
             });
         if (member != members.end()) {
             member->game_info = game_info;
+
+            const std::string display_name =
+                member->user_data.username.empty()
+                    ? member->nickname
+                    : fmt::format("{} ({})", member->nickname, member->user_data.username);
+
+            if (game_info.name.empty()) {
+                LOG_INFO(Network, "{} is not playing", display_name);
+            } else {
+                LOG_INFO(Network, "{} is playing {}", display_name, game_info.name);
+            }
         }
     }
     BroadcastRoomInformation();
@@ -937,15 +979,20 @@ void Room::RoomImpl::HandleGameNamePacket(const ENetEvent* event) {
 
 void Room::RoomImpl::HandleClientDisconnection(ENetPeer* client) {
     // Remove the client from the members list.
-    std::string nickname, username;
+    std::string nickname, username, ip;
     {
-        std::lock_guard<std::mutex> lock(member_mutex);
+        std::lock_guard lock(member_mutex);
         auto member = std::find_if(members.begin(), members.end(), [client](const Member& member) {
             return member.peer == client;
         });
         if (member != members.end()) {
             nickname = member->nickname;
             username = member->user_data.username;
+
+            char ip_raw[256];
+            enet_address_get_host_ip(&member->peer->address, ip_raw, sizeof(ip_raw) - 1);
+            ip = ip_raw;
+
             members.erase(member);
         }
     }
@@ -953,7 +1000,7 @@ void Room::RoomImpl::HandleClientDisconnection(ENetPeer* client) {
     // Announce the change to all clients.
     enet_peer_disconnect(client, 0);
     if (!nickname.empty())
-        SendStatusMessage(IdMemberLeave, nickname, username);
+        SendStatusMessage(IdMemberLeave, nickname, username, ip);
     BroadcastRoomInformation();
 }
 
@@ -1009,18 +1056,18 @@ const RoomInformation& Room::GetRoomInformation() const {
 }
 
 std::string Room::GetVerifyUID() const {
-    std::lock_guard<std::mutex> lock(room_impl->verify_UID_mutex);
+    std::lock_guard lock(room_impl->verify_UID_mutex);
     return room_impl->verify_UID;
 }
 
 Room::BanList Room::GetBanList() const {
-    std::lock_guard<std::mutex> lock(room_impl->ban_list_mutex);
+    std::lock_guard lock(room_impl->ban_list_mutex);
     return {room_impl->username_ban_list, room_impl->ip_ban_list};
 }
 
 std::vector<Room::Member> Room::GetRoomMemberList() const {
     std::vector<Room::Member> member_list;
-    std::lock_guard<std::mutex> lock(room_impl->member_mutex);
+    std::lock_guard lock(room_impl->member_mutex);
     for (const auto& member_impl : room_impl->members) {
         Member member;
         member.nickname = member_impl.nickname;
@@ -1039,7 +1086,7 @@ bool Room::HasPassword() const {
 }
 
 void Room::SetVerifyUID(const std::string& uid) {
-    std::lock_guard<std::mutex> lock(room_impl->verify_UID_mutex);
+    std::lock_guard lock(room_impl->verify_UID_mutex);
     room_impl->verify_UID = uid;
 }
 
@@ -1054,7 +1101,7 @@ void Room::Destroy() {
     room_impl->room_information = {};
     room_impl->server = nullptr;
     {
-        std::lock_guard<std::mutex> lock(room_impl->member_mutex);
+        std::lock_guard lock(room_impl->member_mutex);
         room_impl->members.clear();
     }
     room_impl->room_information.member_slots = 0;

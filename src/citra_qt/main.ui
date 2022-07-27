@@ -15,7 +15,7 @@
   </property>
   <property name="windowIcon">
    <iconset>
-    <normaloff>src/pcafe/res/icon3_64x64.ico</normaloff>src/pcafe/res/icon3_64x64.ico</iconset>
+    <normaloff>dist/citra.png</normaloff>dist/citra.png</iconset>
   </property>
   <property name="tabShape">
    <enum>QTabWidget::Rounded</enum>
@@ -79,10 +79,27 @@
     <property name="title">
      <string>&amp;Emulation</string>
     </property>
+    <widget class="QMenu" name="menu_Save_State">
+     <property name="title">
+      <string>Save State</string>
+     </property>
+     <addaction name="action_Save_to_Oldest_Slot"/>
+     <addaction name="separator"/>
+    </widget>
+    <widget class="QMenu" name="menu_Load_State">
+     <property name="title">
+      <string>Load State</string>
+     </property>
+     <addaction name="action_Load_from_Newest_Slot"/>
+     <addaction name="separator"/>
+    </widget>
     <addaction name="action_Start"/>
     <addaction name="action_Pause"/>
     <addaction name="action_Stop"/>
     <addaction name="action_Restart"/>
+    <addaction name="separator"/>
+    <addaction name="menu_Load_State"/>
+    <addaction name="menu_Save_State"/>
     <addaction name="separator"/>
     <addaction name="action_Report_Compatibility"/>
     <addaction name="separator"/>
@@ -109,6 +126,7 @@
      <addaction name="action_Screen_Layout_Large_Screen"/>
      <addaction name="action_Screen_Layout_Side_by_Side"/>
      <addaction name="separator"/>
+     <addaction name="action_Screen_Layout_Upright_Screens"/>
      <addaction name="action_Screen_Layout_Swap_Screens"/>
     </widget>
     <addaction name="action_Fullscreen"/>
@@ -145,7 +163,10 @@
      </property>
      <addaction name="action_Record_Movie"/>
      <addaction name="action_Play_Movie"/>
-     <addaction name="action_Stop_Recording_Playback"/>
+     <addaction name="action_Close_Movie"/>
+     <addaction name="separator"/>
+     <addaction name="action_Movie_Read_Only_Mode"/>
+     <addaction name="action_Save_Movie"/>
     </widget>
     <widget class="QMenu" name="menu_Frame_Advance">
      <property name="title">
@@ -158,6 +179,7 @@
     <addaction name="menu_Frame_Advance"/>
     <addaction name="separator"/>
     <addaction name="action_Capture_Screenshot"/>
+    <addaction name="action_Dump_Video"/>
    </widget>
    <widget class="QMenu" name="menu_Help">
     <property name="title">
@@ -184,11 +206,6 @@
   <action name="action_Install_CIA">
    <property name="text">
     <string>Install CIA...</string>
-   </property>
-  </action>
-  <action name="action_Load_Symbol_Map">
-   <property name="text">
-    <string>Load Symbol Map...</string>
    </property>
   </action>
   <action name="action_Exit">
@@ -220,6 +237,22 @@
     <string>&amp;Stop</string>
    </property>
   </action>
+  <action name="action_Save">
+    <property name="enabled">
+      <bool>false</bool>
+    </property>
+    <property name="text">
+      <string>Save</string>
+    </property>
+  </action>
+  <action name="action_Load">
+    <property name="enabled">
+      <bool>false</bool>
+    </property>
+    <property name="text">
+      <string>Load</string>
+    </property>
+  </action>
   <action name="action_FAQ">
    <property name="text">
     <string>FAQ</string>
@@ -236,6 +269,16 @@
    </property>
    <property name="text">
     <string>Single Window Mode</string>
+   </property>
+  </action>
+  <action name="action_Save_to_Oldest_Slot">
+   <property name="text">
+    <string>Save to Oldest Slot</string>
+   </property>
+  </action>
+  <action name="action_Load_from_Newest_Slot">
+   <property name="text">
+    <string>Load from Newest Slot</string>
    </property>
   </action>
   <action name="action_Configure">
@@ -272,49 +315,48 @@
     <string>Show Status Bar</string>
    </property>
   </action>
-  <action name="action_Select_Game_List_Root">
-   <property name="text">
-    <string>Select Game Directory...</string>
-   </property>
-   <property name="toolTip">
-    <string>Selects a folder to display in the game list</string>
-   </property>
-  </action>
   <action name="action_Create_Pica_Surface_Viewer">
    <property name="text">
     <string>Create Pica Surface Viewer</string>
    </property>
   </action>
   <action name="action_Record_Movie">
-   <property name="enabled">
-    <bool>true</bool>
-   </property>
    <property name="text">
-    <string>Record Movie</string>
+    <string>Record...</string>
    </property>
   </action>
   <action name="action_Play_Movie">
-   <property name="enabled">
-    <bool>true</bool>
-   </property>
    <property name="text">
-    <string>Play Movie</string>
+    <string>Play...</string>
    </property>
   </action>
-  <action name="action_Stop_Recording_Playback">
+  <action name="action_Close_Movie">
+   <property name="text">
+    <string>Close</string>
+   </property>
+  </action>
+  <action name="action_Save_Movie">
    <property name="enabled">
     <bool>false</bool>
    </property>
    <property name="text">
-    <string>Stop Recording / Playback</string>
+    <string>Save without Closing</string>
+   </property>
+  </action>
+  <action name="action_Movie_Read_Only_Mode">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="checked">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Read-Only Mode</string>
    </property>
   </action>
   <action name="action_Enable_Frame_Advancing">
    <property name="checkable">
     <bool>true</bool>
-   </property>
-   <property name="enabled">
-    <bool>false</bool>
    </property>
    <property name="text">
     <string>Enable Frame Advancing</string>
@@ -334,6 +376,14 @@
    </property>
    <property name="text">
     <string>Capture Screenshot</string>
+   </property>
+  </action>
+  <action name="action_Dump_Video">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Dump Video</string>
    </property>
   </action>
   <action name="action_View_Lobby">
@@ -427,6 +477,14 @@
    </property>
    <property name="text">
     <string>Swap Screens</string>
+   </property>
+  </action>
+  <action name="action_Screen_Layout_Upright_Screens">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Rotate Upright</string>
    </property>
   </action>
   <action name="action_Check_For_Updates">

@@ -6,6 +6,9 @@
 
 #include <array>
 #include <cstddef>
+#include <memory>
+#include <boost/serialization/array.hpp>
+#include <boost/serialization/shared_ptr.hpp>
 #include "common/common_types.h"
 #include "core/hle/kernel/object.h"
 #include "core/hle/result.h"
@@ -50,7 +53,7 @@ public:
      * @return The created Handle or one of the following errors:
      *           - `ERR_OUT_OF_HANDLES`: the maximum number of handles has been exceeded.
      */
-    ResultVal<Handle> Create(SharedPtr<Object> obj);
+    ResultVal<Handle> Create(std::shared_ptr<Object> obj);
 
     /**
      * Returns a new handle that points to the same object as the passed in handle.
@@ -74,7 +77,7 @@ public:
      * Looks up a handle.
      * @return Pointer to the looked-up object, or `nullptr` if the handle is not valid.
      */
-    SharedPtr<Object> GetGeneric(Handle handle) const;
+    std::shared_ptr<Object> GetGeneric(Handle handle) const;
 
     /**
      * Looks up a handle while verifying its type.
@@ -82,7 +85,7 @@ public:
      *         type differs from the requested one.
      */
     template <class T>
-    SharedPtr<T> Get(Handle handle) const {
+    std::shared_ptr<T> Get(Handle handle) const {
         return DynamicObjectCast<T>(GetGeneric(handle));
     }
 
@@ -97,7 +100,7 @@ private:
     static const std::size_t MAX_COUNT = 4096;
 
     /// Stores the Object referenced by the handle or null if the slot is empty.
-    std::array<SharedPtr<Object>, MAX_COUNT> objects;
+    std::array<std::shared_ptr<Object>, MAX_COUNT> objects;
 
     /**
      * The value of `next_generation` when the handle was created, used to check for validity. For
@@ -115,6 +118,15 @@ private:
     u16 next_free_slot;
 
     KernelSystem& kernel;
+
+    friend class boost::serialization::access;
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int file_version) {
+        ar& objects;
+        ar& generations;
+        ar& next_generation;
+        ar& next_free_slot;
+    }
 };
 
 } // namespace Kernel

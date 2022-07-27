@@ -6,11 +6,16 @@
 
 #include <memory>
 #include <glad/glad.h>
+#include "video_core/rasterizer_interface.h"
 #include "video_core/regs_lighting.h"
 #include "video_core/renderer_opengl/gl_resource_manager.h"
 #include "video_core/renderer_opengl/gl_shader_gen.h"
 #include "video_core/renderer_opengl/gl_state.h"
 #include "video_core/renderer_opengl/pica_to_gl.h"
+
+namespace Core {
+class System;
+}
 
 namespace OpenGL {
 
@@ -91,39 +96,31 @@ static_assert(
 static_assert(sizeof(VSUniformData) < 16384,
               "VSUniformData structure must be less than 16kb as per the OpenGL spec");
 
-struct GSUniformData {
-    PicaUniformsData uniforms;
-};
-static_assert(
-    sizeof(GSUniformData) == 1856,
-    "The size of the GSUniformData structure has changed, update the structure in the shader");
-static_assert(sizeof(GSUniformData) < 16384,
-              "GSUniformData structure must be less than 16kb as per the OpenGL spec");
-
 /// A class that manage different shader stages and configures them with given config data.
 class ShaderProgramManager {
 public:
-    ShaderProgramManager(bool separable, bool is_amd);
+    ShaderProgramManager(Frontend::EmuWindow& emu_window_, bool separable, bool is_amd);
     ~ShaderProgramManager();
 
-    bool UseProgrammableVertexShader(const PicaVSConfig& config,
-                                     const Pica::Shader::ShaderSetup setup);
+    void LoadDiskCache(const std::atomic_bool& stop_loading,
+                       const VideoCore::DiskResourceLoadCallback& callback);
+
+    bool UseProgrammableVertexShader(const Pica::Regs& config, Pica::Shader::ShaderSetup& setup);
 
     void UseTrivialVertexShader();
 
-    bool UseProgrammableGeometryShader(const PicaGSConfig& config,
-                                       const Pica::Shader::ShaderSetup setup);
-
-    void UseFixedGeometryShader(const PicaFixedGSConfig& config);
+    void UseFixedGeometryShader(const Pica::Regs& regs);
 
     void UseTrivialGeometryShader();
 
-    void UseFragmentShader(const PicaFSConfig& config);
+    void UseFragmentShader(const Pica::Regs& config);
 
     void ApplyTo(OpenGLState& state);
 
 private:
     class Impl;
     std::unique_ptr<Impl> impl;
+
+    Frontend::EmuWindow& emu_window;
 };
 } // namespace OpenGL

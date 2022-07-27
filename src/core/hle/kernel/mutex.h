@@ -4,7 +4,12 @@
 
 #pragma once
 
+#include <memory>
 #include <string>
+#include <boost/serialization/base_object.hpp>
+#include <boost/serialization/export.hpp>
+#include <boost/serialization/shared_ptr.hpp>
+#include <boost/serialization/string.hpp>
 #include "common/common_types.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/wait_object.h"
@@ -16,6 +21,9 @@ class Thread;
 
 class Mutex final : public WaitObject {
 public:
+    explicit Mutex(KernelSystem& kernel);
+    ~Mutex() override;
+
     std::string GetTypeName() const override {
         return "Mutex";
     }
@@ -23,15 +31,15 @@ public:
         return name;
     }
 
-    static const HandleType HANDLE_TYPE = HandleType::Mutex;
+    static constexpr HandleType HANDLE_TYPE = HandleType::Mutex;
     HandleType GetHandleType() const override {
         return HANDLE_TYPE;
     }
 
-    int lock_count;                   ///< Number of times the mutex has been acquired
-    u32 priority;                     ///< The priority of the mutex, used for priority inheritance.
-    std::string name;                 ///< Name of mutex (optional)
-    SharedPtr<Thread> holding_thread; ///< Thread that has acquired the mutex
+    int lock_count;   ///< Number of times the mutex has been acquired
+    u32 priority;     ///< The priority of the mutex, used for priority inheritance.
+    std::string name; ///< Name of mutex (optional)
+    std::shared_ptr<Thread> holding_thread; ///< Thread that has acquired the mutex
 
     /**
      * Elevate the mutex priority to the best priority
@@ -39,10 +47,10 @@ public:
      */
     void UpdatePriority();
 
-    bool ShouldWait(Thread* thread) const override;
+    bool ShouldWait(const Thread* thread) const override;
     void Acquire(Thread* thread) override;
 
-    void AddWaitingThread(SharedPtr<Thread> thread) override;
+    void AddWaitingThread(std::shared_ptr<Thread> thread) override;
     void RemoveWaitingThread(Thread* thread) override;
 
     /**
@@ -53,11 +61,17 @@ public:
     ResultCode Release(Thread* thread);
 
 private:
-    explicit Mutex(KernelSystem& kernel);
-    ~Mutex() override;
-
-    friend class KernelSystem;
     KernelSystem& kernel;
+
+    friend class boost::serialization::access;
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int file_version) {
+        ar& boost::serialization::base_object<WaitObject>(*this);
+        ar& lock_count;
+        ar& priority;
+        ar& name;
+        ar& holding_thread;
+    }
 };
 
 /**
@@ -67,3 +81,6 @@ private:
 void ReleaseThreadMutexes(Thread* thread);
 
 } // namespace Kernel
+
+BOOST_CLASS_EXPORT_KEY(Kernel::Mutex)
+CONSTRUCT_KERNEL_OBJECT(Kernel::Mutex)

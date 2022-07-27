@@ -7,6 +7,7 @@
 #include <QImage>
 #include <QList>
 #include <QLocale>
+#include <QMessageBox>
 #include <QMetaType>
 #include <QTime>
 #include <QtConcurrent/QtConcurrentRun>
@@ -16,18 +17,18 @@
 #include "citra_qt/multiplayer/message.h"
 #include "citra_qt/multiplayer/state.h"
 #include "citra_qt/multiplayer/validation.h"
-#include "citra_qt/ui_settings.h"
+#include "citra_qt/uisettings.h"
 #include "common/logging/log.h"
-#include "core/announce_multiplayer_session.h"
 #include "core/hle/service/cfg/cfg.h"
-#include "core/settings.h"
+#include "network/announce_multiplayer_session.h"
+#include "network/network_settings.h"
 #include "ui_host_room.h"
 #ifdef ENABLE_WEB_SERVICE
 #include "web_service/verify_user_jwt.h"
 #endif
 
 HostRoomWindow::HostRoomWindow(QWidget* parent, QStandardItemModel* list,
-                               std::shared_ptr<Core::AnnounceMultiplayerSession> session)
+                               std::shared_ptr<Network::AnnounceMultiplayerSession> session)
     : QDialog(parent, Qt::WindowTitleHint | Qt::WindowCloseButtonHint | Qt::WindowSystemMenuHint),
       ui(std::make_unique<Ui::HostRoom>()), announce_multiplayer_session(session) {
     ui->setupUi(this);
@@ -40,13 +41,7 @@ HostRoomWindow::HostRoomWindow(QWidget* parent, QStandardItemModel* list,
 
     // Create a proxy to the game list to display the list of preferred games
     game_list = new QStandardItemModel;
-
-    for (int i = 0; i < list->rowCount(); i++) {
-        auto parent = list->item(i, 0);
-        for (int j = 0; j < parent->rowCount(); j++) {
-            game_list->appendRow(parent->child(j)->clone());
-        }
-    }
+    UpdateGameList(list);
 
     proxy = new ComboBoxProxyModel;
     proxy->setSourceModel(game_list);
@@ -54,13 +49,13 @@ HostRoomWindow::HostRoomWindow(QWidget* parent, QStandardItemModel* list,
     ui->game_list->setModel(proxy);
 
     // Connect all the widgets to the appropriate events
-    connect(ui->host, &QPushButton::pressed, this, &HostRoomWindow::Host);
+    connect(ui->host, &QPushButton::clicked, this, &HostRoomWindow::Host);
 
     // Restore the settings:
     ui->username->setText(UISettings::values.room_nickname);
-    if (ui->username->text().isEmpty() && !Settings::values.citra_username.empty()) {
+    if (ui->username->text().isEmpty() && !NetSettings::values.citra_username.empty()) {
         // Use Citra Web Service user name as nickname by default
-        ui->username->setText(QString::fromStdString(Settings::values.citra_username));
+        ui->username->setText(QString::fromStdString(NetSettings::values.citra_username));
     }
     ui->room_name->setText(UISettings::values.room_name);
     ui->port->setText(UISettings::values.room_port);
@@ -78,6 +73,16 @@ HostRoomWindow::HostRoomWindow(QWidget* parent, QStandardItemModel* list,
 
 HostRoomWindow::~HostRoomWindow() = default;
 
+void HostRoomWindow::UpdateGameList(QStandardItemModel* list) {
+    game_list->clear();
+    for (int i = 0; i < list->rowCount(); i++) {
+        auto parent = list->item(i, 0);
+        for (int j = 0; j < parent->rowCount(); j++) {
+            game_list->appendRow(parent->child(j)->clone());
+        }
+    }
+}
+
 void HostRoomWindow::RetranslateUi() {
     ui->retranslateUi(this);
 }
@@ -87,7 +92,8 @@ std::unique_ptr<Network::VerifyUser::Backend> HostRoomWindow::CreateVerifyBacken
     std::unique_ptr<Network::VerifyUser::Backend> verify_backend;
     if (use_validation) {
 #ifdef ENABLE_WEB_SERVICE
-        verify_backend = std::make_unique<WebService::VerifyUserJWT>(Settings::values.web_api_url);
+        verify_backend =
+            std::make_unique<WebService::VerifyUserJWT>(NetSettings::values.web_api_url);
 #else
         verify_backend = std::make_unique<Network::VerifyUser::NullBackend>();
 #endif
@@ -99,15 +105,19 @@ std::unique_ptr<Network::VerifyUser::Backend> HostRoomWindow::CreateVerifyBacken
 
 void HostRoomWindow::Host() {
     if (!ui->username->hasAcceptableInput()) {
-        NetworkMessage::ShowError(NetworkMessage::USERNAME_NOT_VALID);
+        NetworkMessage::ErrorManager::ShowError(NetworkMessage::ErrorManager::USERNAME_NOT_VALID);
         return;
     }
     if (!ui->room_name->hasAcceptableInput()) {
-        NetworkMessage::ShowError(NetworkMessage::ROOMNAME_NOT_VALID);
+        NetworkMessage::ErrorManager::ShowError(NetworkMessage::ErrorManager::ROOMNAME_NOT_VALID);
         return;
     }
     if (!ui->port->hasAcceptableInput()) {
-        NetworkMessage::ShowError(NetworkMessage::PORT_NOT_VALID);
+        NetworkMessage::ErrorManager::ShowError(NetworkMessage::ErrorManager::PORT_NOT_VALID);
+        return;
+    }
+    if (ui->game_list->currentIndex() == -1) {
+        NetworkMessage::ErrorManager::ShowError(NetworkMessage::ErrorManager::GAME_NOT_SELECTED);
         return;
     }
     if (auto member = Network::GetRoomMember().lock()) {
@@ -135,10 +145,11 @@ void HostRoomWindow::Host() {
             bool created = room->Create(ui->room_name->text().toStdString(),
                                         ui->room_description->toPlainText().toStdString(), "", port,
                                         password, ui->max_player->value(),
-                                        Settings::values.citra_username, game_name.toStdString(),
+                                        NetSettings::values.citra_username, game_name.toStdString(),
                                         game_id, CreateVerifyBackend(is_public), ban_list);
             if (!created) {
-                NetworkMessage::ShowError(NetworkMessage::COULD_NOT_CREATE_ROOM);
+                NetworkMessage::ErrorManager::ShowError(
+                    NetworkMessage::ErrorManager::COULD_NOT_CREATE_ROOM);
                 LOG_ERROR(Network, "Could not create room!");
                 ui->host->setEnabled(true);
                 return;
@@ -148,7 +159,22 @@ void HostRoomWindow::Host() {
         if (is_public) {
             if (auto session = announce_multiplayer_session.lock()) {
                 // Register the room first to ensure verify_UID is present when we connect
-                session->Register();
+                Common::WebResult result = session->Register();
+                if (result.result_code != Common::WebResult::Code::Success) {
+                    QMessageBox::warning(
+                        this, tr("Error"),
+                        tr("Failed to announce the room to the public lobby. In order to host a "
+                           "room publicly, you must have a valid Citra account configured in "
+                           "Emulation -> Configure -> Web. If you do not want to publish a room in "
+                           "the public lobby, then select Unlisted instead.\nDebug Message: ") +
+                            QString::fromStdString(result.result_string),
+                        QMessageBox::Ok);
+                    ui->host->setEnabled(true);
+                    if (auto room = Network::GetRoom().lock()) {
+                        room->Destroy();
+                    }
+                    return;
+                }
                 session->Start();
             } else {
                 LOG_ERROR(Network, "Starting announce session failed");
@@ -157,8 +183,9 @@ void HostRoomWindow::Host() {
         std::string token;
 #ifdef ENABLE_WEB_SERVICE
         if (is_public) {
-            WebService::Client client(Settings::values.web_api_url, Settings::values.citra_username,
-                                      Settings::values.citra_token);
+            WebService::Client client(NetSettings::values.web_api_url,
+                                      NetSettings::values.citra_username,
+                                      NetSettings::values.citra_token);
             if (auto room = Network::GetRoom().lock()) {
                 token = client.GetExternalJWT(room->GetVerifyUID()).returned_data;
             }
@@ -185,7 +212,6 @@ void HostRoomWindow::Host() {
                                            ? ui->port->text()
                                            : QString::number(Network::DefaultRoomPort);
         UISettings::values.room_description = ui->room_description->toPlainText();
-        Settings::Apply();
         ui->host->setEnabled(true);
         close();
     }

@@ -6,6 +6,8 @@
 
 #include <memory>
 #include <string>
+#include <boost/serialization/export.hpp>
+#include <boost/serialization/string.hpp>
 #include "common/common_types.h"
 #include "core/file_sys/archive_backend.h"
 #include "core/hle/result.h"
@@ -31,6 +33,14 @@ public:
 
 private:
     std::string base_path;
+
+    ArchiveFactory_SystemSaveData() = default;
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int) {
+        ar& boost::serialization::base_object<ArchiveFactory>(*this);
+        ar& base_path;
+    }
+    friend class boost::serialization::access;
 };
 
 /**
@@ -40,7 +50,7 @@ private:
  * @param path The path that identifies the requested concrete SystemSaveData archive.
  * @returns The complete path to the specified SystemSaveData archive in the host filesystem
  */
-std::string GetSystemSaveDataPath(const std::string& mount_point, const Path& path);
+std::string GetSystemSaveDataPath(std::string_view mount_point, const Path& path);
 
 /**
  * Constructs a path to the base folder to hold concrete SystemSaveData archives in the host file
@@ -48,7 +58,7 @@ std::string GetSystemSaveDataPath(const std::string& mount_point, const Path& pa
  * @param mount_point The base folder where this folder resides, ie. SDMC or NAND.
  * @returns The path to the base SystemSaveData archives' folder in the host file system
  */
-std::string GetSystemSaveDataContainerPath(const std::string& mount_point);
+std::string GetSystemSaveDataContainerPath(std::string_view mount_point);
 
 /**
  * Constructs a FileSys::Path object that refers to the SystemSaveData archive identified by
@@ -60,3 +70,5 @@ std::string GetSystemSaveDataContainerPath(const std::string& mount_point);
 Path ConstructSystemSaveDataBinaryPath(u32 high, u32 low);
 
 } // namespace FileSys
+
+BOOST_CLASS_EXPORT_KEY(FileSys::ArchiveFactory_SystemSaveData)

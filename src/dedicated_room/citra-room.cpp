@@ -9,14 +9,7 @@
 #include <regex>
 #include <string>
 #include <thread>
-#include <glad/glad.h>
-
-#ifdef _MSC_VER
-#include <getopt.h>
-#else
-#include <getopt.h>
-#include <unistd.h>
-#endif
+#include <cryptopp/base64.h>
 
 #ifdef _WIN32
 // windows.h needs to be included before shellapi.h
@@ -25,19 +18,28 @@
 #include <shellapi.h>
 #endif
 
+#include "common/common_paths.h"
 #include "common/common_types.h"
 #include "common/detached_tasks.h"
+#include "common/file_util.h"
+#include "common/logging/backend.h"
+#include "common/logging/log.h"
 #include "common/scm_rev.h"
 #include "common/string_util.h"
-#include "core/announce_multiplayer_session.h"
-#include "core/core.h"
-#include "core/settings.h"
+#include "network/announce_multiplayer_session.h"
 #include "network/network.h"
+#include "network/network_settings.h"
 #include "network/room.h"
 #include "network/verify_user.h"
 
 #ifdef ENABLE_WEB_SERVICE
 #include "web_service/verify_user_jwt.h"
+#endif
+
+#undef _UNICODE
+#include <getopt.h>
+#ifndef _MSC_VER
+#include <unistd.h>
 #endif
 
 static void PrintHelp(const char* argv0) {
@@ -54,6 +56,7 @@ static void PrintHelp(const char* argv0) {
                  "--token             The token used for announce\n"
                  "--web-api-url       Citra Web API url\n"
                  "--ban-list-file     The file for storing the room ban list\n"
+                 "--log-file          The file for storing the room log\n"
                  "--enable-citra-mods Allow Citra Community Moderators to moderate on your room\n"
                  "-h, --help          Display this help and exit\n"
                  "-v, --version       Output version information and exit\n";
@@ -66,6 +69,24 @@ static void PrintVersion() {
 
 /// The magic text at the beginning of a citra-room ban list file.
 static constexpr char BanListMagic[] = "CitraRoom-BanList-1";
+
+static constexpr char token_delimiter{':'};
+
+static std::string UsernameFromDisplayToken(const std::string& display_token) {
+    std::string unencoded_display_token;
+    CryptoPP::StringSource ss(
+        display_token, true,
+        new CryptoPP::Base64Decoder(new CryptoPP::StringSink(unencoded_display_token)));
+    return unencoded_display_token.substr(0, unencoded_display_token.find(token_delimiter));
+}
+
+static std::string TokenFromDisplayToken(const std::string& display_token) {
+    std::string unencoded_display_token;
+    CryptoPP::StringSource ss(
+        display_token, true,
+        new CryptoPP::Base64Decoder(new CryptoPP::StringSink(unencoded_display_token)));
+    return unencoded_display_token.substr(unencoded_display_token.find(token_delimiter) + 1);
+}
 
 static Network::Room::BanList LoadBanList(const std::string& path) {
     std::ifstream file;
@@ -129,14 +150,23 @@ static void SaveBanList(const Network::Room::BanList& ban_list, const std::strin
     file.flush();
 }
 
+static void InitializeLogging(const std::string& log_file) {
+    Log::AddBackend(std::make_unique<Log::ColorConsoleBackend>());
+
+    const std::string& log_dir = FileUtil::GetUserPath(FileUtil::UserPath::LogDir);
+    FileUtil::CreateFullPath(log_dir);
+    Log::AddBackend(std::make_unique<Log::FileBackend>(log_dir + log_file));
+
+#ifdef _WIN32
+    Log::AddBackend(std::make_unique<Log::DebuggerBackend>());
+#endif
+}
+
 /// Application entry point
 int main(int argc, char** argv) {
     Common::DetachedTasks detached_tasks;
     int option_index = 0;
     char* endarg;
-
-    // This is just to be able to link against core
-    gladLoadGL();
 
     std::string room_name;
     std::string room_description;
@@ -146,6 +176,7 @@ int main(int argc, char** argv) {
     std::string token;
     std::string web_api_url;
     std::string ban_list_file;
+    std::string log_file = "citra-room.log";
     u64 preferred_game_id = 0;
     u32 port = Network::DefaultRoomPort;
     u32 max_members = 16;
@@ -159,10 +190,11 @@ int main(int argc, char** argv) {
         {"password", required_argument, 0, 'w'},
         {"preferred-game", required_argument, 0, 'g'},
         {"preferred-game-id", required_argument, 0, 'i'},
-        {"username", required_argument, 0, 'u'},
+        {"username", optional_argument, 0, 'u'},
         {"token", required_argument, 0, 't'},
         {"web-api-url", required_argument, 0, 'a'},
         {"ban-list-file", required_argument, 0, 'b'},
+        {"log-file", required_argument, 0, 'l'},
         {"enable-citra-mods", no_argument, 0, 'e'},
         {"help", no_argument, 0, 'h'},
         {"version", no_argument, 0, 'v'},
@@ -170,7 +202,7 @@ int main(int argc, char** argv) {
     };
 
     while (optind < argc) {
-        int arg = getopt_long(argc, argv, "n:d:p:m:w:g:u:t:a:i:hv", long_options, &option_index);
+        int arg = getopt_long(argc, argv, "n:d:p:m:w:g:u:t:a:i:l:hv", long_options, &option_index);
         if (arg != -1) {
             switch (static_cast<char>(arg)) {
             case 'n':
@@ -205,6 +237,9 @@ int main(int argc, char** argv) {
                 break;
             case 'b':
                 ban_list_file.assign(optarg);
+                break;
+            case 'l':
+                log_file.assign(optarg);
                 break;
             case 'e':
                 enable_citra_mods = true;
@@ -249,10 +284,6 @@ int main(int argc, char** argv) {
                      "list.\nSet with --ban-list-file <file>\n\n";
     }
     bool announce = true;
-    if (username.empty()) {
-        announce = false;
-        std::cout << "username is empty: Hosting a private room\n\n";
-    }
     if (token.empty() && announce) {
         announce = false;
         std::cout << "token is empty: Hosting a private room\n\n";
@@ -262,15 +293,25 @@ int main(int argc, char** argv) {
         std::cout << "endpoint url is empty: Hosting a private room\n\n";
     }
     if (announce) {
-        std::cout << "Hosting a public room\n\n";
-        Settings::values.web_api_url = web_api_url;
-        Settings::values.citra_username = username;
-        Settings::values.citra_token = token;
+        if (username.empty()) {
+            std::cout << "Hosting a public room\n\n";
+            NetSettings::values.web_api_url = web_api_url;
+            NetSettings::values.citra_username = UsernameFromDisplayToken(token);
+            username = NetSettings::values.citra_username;
+            NetSettings::values.citra_token = TokenFromDisplayToken(token);
+        } else {
+            std::cout << "Hosting a public room\n\n";
+            NetSettings::values.web_api_url = web_api_url;
+            NetSettings::values.citra_username = username;
+            NetSettings::values.citra_token = token;
+        }
     }
     if (!announce && enable_citra_mods) {
         enable_citra_mods = false;
         std::cout << "Can not enable Citra Moderators for private rooms\n\n";
     }
+
+    InitializeLogging(log_file);
 
     // Load the ban list
     Network::Room::BanList ban_list;
@@ -281,7 +322,8 @@ int main(int argc, char** argv) {
     std::unique_ptr<Network::VerifyUser::Backend> verify_backend;
     if (announce) {
 #ifdef ENABLE_WEB_SERVICE
-        verify_backend = std::make_unique<WebService::VerifyUserJWT>(Settings::values.web_api_url);
+        verify_backend =
+            std::make_unique<WebService::VerifyUserJWT>(NetSettings::values.web_api_url);
 #else
         std::cout
             << "Citra Web Services is not available with this build: validation is disabled.\n\n";
@@ -300,7 +342,7 @@ int main(int argc, char** argv) {
             return -1;
         }
         std::cout << "Room is open. Close with Q+Enter...\n\n";
-        auto announce_session = std::make_unique<Core::AnnounceMultiplayerSession>();
+        auto announce_session = std::make_unique<Network::AnnounceMultiplayerSession>();
         if (announce) {
             announce_session->Start();
         }
@@ -308,17 +350,7 @@ int main(int argc, char** argv) {
             std::string in;
             std::cin >> in;
             if (in.size() > 0) {
-                if (announce) {
-                    announce_session->Stop();
-                }
-                announce_session.reset();
-                // Save the ban list
-                if (!ban_list_file.empty()) {
-                    SaveBanList(room->GetBanList(), ban_list_file);
-                }
-                room->Destroy();
-                Network::Shutdown();
-                return 0;
+                break;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }

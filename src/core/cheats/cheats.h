@@ -26,6 +26,7 @@ class CheatEngine {
 public:
     explicit CheatEngine(Core::System& system);
     ~CheatEngine();
+    void Connect();
     std::vector<std::shared_ptr<CheatBase>> GetCheats() const;
     void AddCheat(const std::shared_ptr<CheatBase>& cheat);
     void RemoveCheat(int index);
@@ -34,7 +35,7 @@ public:
 
 private:
     void LoadCheatFile();
-    void RunCallback(u64 userdata, int cycles_late);
+    void RunCallback(u64 userdata, s64 cycles_late);
     std::vector<std::shared_ptr<CheatBase>> cheats_list;
     mutable std::shared_mutex cheats_list_mutex;
     Core::TimingEventType* event;

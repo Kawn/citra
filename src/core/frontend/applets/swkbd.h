@@ -30,24 +30,22 @@ enum class ButtonConfig {
 };
 
 /// Default English button text mappings. Frontends may need to copy this to internationalize it.
-constexpr char BUTTON_OKAY[] = "Ok";
-constexpr char BUTTON_CANCEL[] = "Cancel";
-constexpr char BUTTON_FORGOT[] = "I Forgot";
+constexpr char SWKBD_BUTTON_OKAY[] = "Ok";
+constexpr char SWKBD_BUTTON_CANCEL[] = "Cancel";
+constexpr char SWKBD_BUTTON_FORGOT[] = "I Forgot";
 
 /// Configuration thats relevent to frontend implementation of applets. Anything missing that we
 /// later learn is needed can be added here and filled in by the backend HLE applet
 struct KeyboardConfig {
     ButtonConfig button_config;
-    AcceptedInput accept_mode;   /// What kinds of input are accepted (blank/empty/fixed width)
-    bool multiline_mode;         /// True if the keyboard accepts multiple lines of input
-    u16 max_text_length;         /// Maximum number of letters allowed if its a text input
-    u16 max_digits;              /// Maximum number of numbers allowed if its a number input
-    std::string hint_text;       /// Displayed in the field as a hint before
-    bool has_custom_button_text; /// If true, use the button_text instead
+    AcceptedInput accept_mode; /// What kinds of input are accepted (blank/empty/fixed width)
+    bool multiline_mode;       /// True if the keyboard accepts multiple lines of input
+    u16 max_text_length;       /// Maximum number of letters allowed if its a text input
+    u16 max_digits;            /// Maximum number of numbers allowed if its a number input
+    std::string hint_text;     /// Displayed in the field as a hint before
     std::vector<std::string> button_text; /// Contains the button text that the caller provides
     struct Filters {
-        bool prevent_digit;     /// Disallow the use of more than a certain number of digits
-                                /// TODO: how many is a certain number
+        bool prevent_digit;     /// Limit maximum digit count to max_digits
         bool prevent_at;        /// Disallow the use of the @ sign.
         bool prevent_percent;   /// Disallow the use of the % sign.
         bool prevent_backslash; /// Disallow the use of the \ sign.
@@ -67,7 +65,7 @@ enum class ValidationError {
     // Button Selection
     ButtonOutOfRange,
     // Configured Filters
-    DigitNotAllowed,
+    MaxDigitsExceeded,
     AtSignNotAllowed,
     PercentNotAllowed,
     BackslashNotAllowed,
@@ -82,12 +80,29 @@ enum class ValidationError {
 
 class SoftwareKeyboard {
 public:
-    virtual void Setup(const KeyboardConfig* config) {
-        this->config = KeyboardConfig(*config);
+    virtual ~SoftwareKeyboard() = default;
+
+    /**
+     * Executes the software keyboard, configured with the given parameters.
+     */
+    virtual void Execute(const KeyboardConfig& config) {
+        this->config = config;
     }
-    const KeyboardData* ReceiveData() {
-        return &data;
-    }
+
+    /**
+     * Whether the result data is ready to be received.
+     */
+    bool DataReady() const;
+
+    /**
+     * Receives the current result data stored in the applet, and clears the ready state.
+     */
+    const KeyboardData& ReceiveData();
+
+    /**
+     * Shows an error text returned by the callback.
+     */
+    virtual void ShowError(const std::string& error) = 0;
 
     /**
      * Validates if the provided string breaks any of the filter rules. This is meant to be called
@@ -117,15 +132,14 @@ public:
 protected:
     KeyboardConfig config;
     KeyboardData data;
+
+    bool data_ready = false;
 };
 
 class DefaultKeyboard final : public SoftwareKeyboard {
 public:
-    void Setup(const KeyboardConfig* config) override;
+    void Execute(const KeyboardConfig& config) override;
+    void ShowError(const std::string& error) override;
 };
-
-void RegisterSoftwareKeyboard(std::shared_ptr<SoftwareKeyboard> applet);
-
-std::shared_ptr<SoftwareKeyboard> GetRegisteredSoftwareKeyboard();
 
 } // namespace Frontend

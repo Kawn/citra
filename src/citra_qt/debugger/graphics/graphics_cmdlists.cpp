@@ -57,11 +57,11 @@ public:
 
 GPUCommandListModel::GPUCommandListModel(QObject* parent) : QAbstractListModel(parent) {}
 
-int GPUCommandListModel::rowCount(const QModelIndex& parent) const {
+int GPUCommandListModel::rowCount([[maybe_unused]] const QModelIndex& parent) const {
     return static_cast<int>(pica_trace.writes.size());
 }
 
-int GPUCommandListModel::columnCount(const QModelIndex& parent) const {
+int GPUCommandListModel::columnCount([[maybe_unused]] const QModelIndex& parent) const {
     return 4;
 }
 
@@ -76,11 +76,11 @@ QVariant GPUCommandListModel::data(const QModelIndex& index, int role) const {
         case 0:
             return QString::fromLatin1(Pica::Regs::GetRegisterName(write.cmd_id));
         case 1:
-            return QString("%1").arg(write.cmd_id, 3, 16, QLatin1Char('0'));
+            return QStringLiteral("%1").arg(write.cmd_id, 3, 16, QLatin1Char('0'));
         case 2:
-            return QString("%1").arg(write.mask, 4, 2, QLatin1Char('0'));
+            return QStringLiteral("%1").arg(write.mask, 4, 2, QLatin1Char('0'));
         case 3:
-            return QString("%1").arg(write.value, 8, 16, QLatin1Char('0'));
+            return QStringLiteral("%1").arg(write.value, 8, 16, QLatin1Char('0'));
         }
     } else if (role == CommandIdRole) {
         return QVariant::fromValue<int>(write.cmd_id);
@@ -89,7 +89,8 @@ QVariant GPUCommandListModel::data(const QModelIndex& index, int role) const {
     return QVariant();
 }
 
-QVariant GPUCommandListModel::headerData(int section, Qt::Orientation orientation, int role) const {
+QVariant GPUCommandListModel::headerData(int section, [[maybe_unused]] Qt::Orientation orientation,
+                                         int role) const {
     switch (role) {
     case Qt::DisplayRole: {
         switch (section) {
@@ -184,7 +185,7 @@ void GPUCommandListWidget::SetCommandInfo(const QModelIndex& index) {
 
 GPUCommandListWidget::GPUCommandListWidget(QWidget* parent)
     : QDockWidget(tr("Pica Command List"), parent) {
-    setObjectName("Pica Command List");
+    setObjectName(QStringLiteral("Pica Command List"));
     GPUCommandListModel* model = new GPUCommandListModel(this);
 
     QWidget* main_widget = new QWidget;
@@ -246,9 +247,9 @@ void GPUCommandListWidget::CopyAllToClipboard() {
         for (int col = 0; col < model->columnCount({}); ++col) {
             QModelIndex index = model->index(row, col);
             text += model->data(index).value<QString>();
-            text += '\t';
+            text += QLatin1Char('\t');
         }
-        text += '\n';
+        text += QLatin1Char('\n');
     }
 
     clipboard->setText(text);

@@ -3,6 +3,7 @@
 // Refer to the license.txt file included.
 
 #include "common/alignment.h"
+#include "common/archives.h"
 #include "common/common_types.h"
 #include "common/logging/log.h"
 #include "core/arm/arm_interface.h"
@@ -11,6 +12,10 @@
 #include "core/hle/kernel/process.h"
 #include "core/hle/service/ldr_ro/cro_helper.h"
 #include "core/hle/service/ldr_ro/ldr_ro.h"
+
+SERVICE_CONSTRUCT_IMPL(Service::LDR::RO)
+SERIALIZE_EXPORT_IMPL(Service::LDR::RO)
+SERIALIZE_EXPORT_IMPL(Service::LDR::ClientSlot)
 
 namespace Service::LDR {
 
@@ -41,10 +46,17 @@ static const ResultCode ERROR_NOT_LOADED = // 0xD8A12C0D
 
 static bool VerifyBufferState(Kernel::Process& process, VAddr buffer_ptr, u32 size) {
     auto vma = process.vm_manager.FindVMA(buffer_ptr);
-    return vma != process.vm_manager.vma_map.end() &&
-           vma->second.base + vma->second.size >= buffer_ptr + size &&
-           vma->second.permissions == Kernel::VMAPermission::ReadWrite &&
-           vma->second.meminfo_state == Kernel::MemoryState::Private;
+    while (vma != process.vm_manager.vma_map.end()) {
+        if (vma->second.permissions != Kernel::VMAPermission::ReadWrite ||
+            vma->second.meminfo_state != Kernel::MemoryState::Private) {
+            return false;
+        }
+        if (vma->second.base + vma->second.size >= buffer_ptr + size) {
+            return true;
+        }
+        vma = std::next(vma);
+    }
+    return false;
 }
 
 void RO::Initialize(Kernel::HLERequestContext& ctx) {
@@ -115,7 +127,7 @@ void RO::Initialize(Kernel::HLERequestContext& ctx) {
         return;
     }
 
-    CROHelper crs(crs_address, *process, system.Memory(), system.CPU());
+    CROHelper crs(crs_address, *process, system);
     crs.InitCRS();
 
     result = crs.Rebase(0, crs_size, 0, 0, 0, 0, true);
@@ -249,7 +261,7 @@ void RO::LoadCRO(Kernel::HLERequestContext& ctx, bool link_on_load_bug_fix) {
         return;
     }
 
-    CROHelper cro(cro_address, *process, system.Memory(), system.CPU());
+    CROHelper cro(cro_address, *process, system);
 
     result = cro.VerifyHash(cro_size, crr_address);
     if (result.IsError()) {
@@ -313,7 +325,7 @@ void RO::LoadCRO(Kernel::HLERequestContext& ctx, bool link_on_load_bug_fix) {
         }
     }
 
-    system.CPU().InvalidateCacheRange(cro_address, cro_size);
+    system.InvalidateCacheRange(cro_address, cro_size);
 
     LOG_INFO(Service_LDR, "CRO \"{}\" loaded at 0x{:08X}, fixed_end=0x{:08X}", cro.ModuleName(),
              cro_address, cro_address + fix_size);
@@ -331,7 +343,7 @@ void RO::UnloadCRO(Kernel::HLERequestContext& ctx) {
     LOG_DEBUG(Service_LDR, "called, cro_address=0x{:08X}, zero={}, cro_buffer_ptr=0x{:08X}",
               cro_address, zero, cro_buffer_ptr);
 
-    CROHelper cro(cro_address, *process, system.Memory(), system.CPU());
+    CROHelper cro(cro_address, *process, system);
 
     IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
 
@@ -386,7 +398,7 @@ void RO::UnloadCRO(Kernel::HLERequestContext& ctx) {
         LOG_ERROR(Service_LDR, "Error unmapping CRO {:08X}", result.raw);
     }
 
-    system.CPU().InvalidateCacheRange(cro_address, fixed_size);
+    system.InvalidateCacheRange(cro_address, fixed_size);
 
     rb.Push(result);
 }
@@ -398,7 +410,7 @@ void RO::LinkCRO(Kernel::HLERequestContext& ctx) {
 
     LOG_DEBUG(Service_LDR, "called, cro_address=0x{:08X}", cro_address);
 
-    CROHelper cro(cro_address, *process, system.Memory(), system.CPU());
+    CROHelper cro(cro_address, *process, system);
 
     IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
 
@@ -438,7 +450,7 @@ void RO::UnlinkCRO(Kernel::HLERequestContext& ctx) {
 
     LOG_DEBUG(Service_LDR, "called, cro_address=0x{:08X}", cro_address);
 
-    CROHelper cro(cro_address, *process, system.Memory(), system.CPU());
+    CROHelper cro(cro_address, *process, system);
 
     IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
 
@@ -487,7 +499,7 @@ void RO::Shutdown(Kernel::HLERequestContext& ctx) {
         return;
     }
 
-    CROHelper crs(slot->loaded_crs, *process, system.Memory(), system.CPU());
+    CROHelper crs(slot->loaded_crs, *process, system);
     crs.Unrebase(true);
 
     ResultCode result = RESULT_SUCCESS;

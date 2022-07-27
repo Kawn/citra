@@ -33,7 +33,7 @@ Loader::ResultStatus TitleMetadata::Load(const std::string& file_path) {
     return result;
 }
 
-Loader::ResultStatus TitleMetadata::Load(const std::vector<u8> file_data, std::size_t offset) {
+Loader::ResultStatus TitleMetadata::Load(const std::vector<u8>& file_data, std::size_t offset) {
     std::size_t total_size = static_cast<std::size_t>(file_data.size() - offset);
     if (total_size < sizeof(u32_be))
         return Loader::ResultStatus::Error;
@@ -165,19 +165,19 @@ u32 TitleMetadata::GetDLPContentID() const {
     return tmd_chunks[TMDContentIndex::DLP].id;
 }
 
-u32 TitleMetadata::GetContentIDByIndex(u16 index) const {
+u32 TitleMetadata::GetContentIDByIndex(std::size_t index) const {
     return tmd_chunks[index].id;
 }
 
-u16 TitleMetadata::GetContentTypeByIndex(u16 index) const {
+u16 TitleMetadata::GetContentTypeByIndex(std::size_t index) const {
     return tmd_chunks[index].type;
 }
 
-u64 TitleMetadata::GetContentSizeByIndex(u16 index) const {
+u64 TitleMetadata::GetContentSizeByIndex(std::size_t index) const {
     return tmd_chunks[index].size;
 }
 
-std::array<u8, 16> TitleMetadata::GetContentCTRByIndex(u16 index) const {
+std::array<u8, 16> TitleMetadata::GetContentCTRByIndex(std::size_t index) const {
     std::array<u8, 16> ctr{};
     std::memcpy(ctr.data(), &tmd_chunks[index].index, sizeof(u16));
     return ctr;

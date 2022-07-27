@@ -2,6 +2,7 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <algorithm>
 #include <atomic>
 #include <list>
 #include <mutex>
@@ -157,9 +158,9 @@ bool RoomMember::RoomMemberImpl::IsConnected() const {
 void RoomMember::RoomMemberImpl::MemberLoop() {
     // Receive packets while the connection is open
     while (IsConnected()) {
-        std::lock_guard<std::mutex> lock(network_mutex);
+        std::lock_guard lock(network_mutex);
         ENetEvent event;
-        if (enet_host_service(client, &event, 100) > 0) {
+        if (enet_host_service(client, &event, 16) > 0) {
             switch (event.type) {
             case ENET_EVENT_TYPE_RECEIVE:
                 switch (event.packet->data[0]) {
@@ -242,18 +243,27 @@ void RoomMember::RoomMemberImpl::MemberLoop() {
                     SetError(Error::LostConnection);
                 }
                 break;
+            case ENET_EVENT_TYPE_NONE:
+                break;
+            case ENET_EVENT_TYPE_CONNECT:
+                // The ENET_EVENT_TYPE_CONNECT event can not possibly happen here because we're
+                // already connected
+                ASSERT_MSG(false, "Received unexpected connect event while already connected");
+                break;
             }
         }
+
+        std::list<Packet> packets;
         {
-            std::lock_guard<std::mutex> lock(send_list_mutex);
-            for (const auto& packet : send_list) {
-                ENetPacket* enetPacket = enet_packet_create(packet.GetData(), packet.GetDataSize(),
-                                                            ENET_PACKET_FLAG_RELIABLE);
-                enet_peer_send(server, 0, enetPacket);
-            }
-            enet_host_flush(client);
-            send_list.clear();
+            std::lock_guard lock(send_list_mutex);
+            packets.swap(send_list);
         }
+        for (const auto& packet : packets) {
+            ENetPacket* enetPacket = enet_packet_create(packet.GetData(), packet.GetDataSize(),
+                                                        ENET_PACKET_FLAG_RELIABLE);
+            enet_peer_send(server, 0, enetPacket);
+        }
+        enet_host_flush(client);
     }
     Disconnect();
 };
@@ -263,7 +273,7 @@ void RoomMember::RoomMemberImpl::StartLoop() {
 }
 
 void RoomMember::RoomMemberImpl::Send(Packet&& packet) {
-    std::lock_guard<std::mutex> lock(send_list_mutex);
+    std::lock_guard lock(send_list_mutex);
     send_list.push_back(std::move(packet));
 }
 
@@ -318,7 +328,7 @@ void RoomMember::RoomMemberImpl::HandleRoomInformationPacket(const ENetEvent* ev
         packet >> member.avatar_url;
 
         {
-            std::lock_guard<std::mutex> lock(username_mutex);
+            std::lock_guard lock(username_mutex);
             if (member.nickname == nickname) {
                 username = member.username;
             }
@@ -371,6 +381,7 @@ void RoomMember::RoomMemberImpl::HandleChatPacket(const ENetEvent* event) {
     packet >> chat_entry.nickname;
     packet >> chat_entry.username;
     packet >> chat_entry.message;
+    chat_entry.message.resize(std::min(chat_entry.message.find('\0'), chat_entry.message.size()));
     Invoke<ChatEntry>(chat_entry);
 }
 
@@ -473,7 +484,7 @@ RoomMember::RoomMemberImpl::Callbacks::Get() {
 
 template <typename T>
 void RoomMember::RoomMemberImpl::Invoke(const T& data) {
-    std::lock_guard<std::mutex> lock(callback_mutex);
+    std::lock_guard lock(callback_mutex);
     CallbackSet<T> callback_set = callbacks.Get<T>();
     for (auto const& callback : callback_set)
         (*callback)(data);
@@ -482,7 +493,7 @@ void RoomMember::RoomMemberImpl::Invoke(const T& data) {
 template <typename T>
 RoomMember::CallbackHandle<T> RoomMember::RoomMemberImpl::Bind(
     std::function<void(const T&)> callback) {
-    std::lock_guard<std::mutex> lock(callback_mutex);
+    std::lock_guard lock(callback_mutex);
     CallbackHandle<T> handle;
     handle = std::make_shared<std::function<void(const T&)>>(callback);
     callbacks.Get<T>().insert(handle);
@@ -512,7 +523,7 @@ const std::string& RoomMember::GetNickname() const {
 }
 
 const std::string& RoomMember::GetUsername() const {
-    std::lock_guard<std::mutex> lock(room_member_impl->username_mutex);
+    std::lock_guard lock(room_member_impl->username_mutex);
     return room_member_impl->username;
 }
 
@@ -663,7 +674,7 @@ RoomMember::CallbackHandle<Room::BanList> RoomMember::BindOnBanListReceived(
 
 template <typename T>
 void RoomMember::Unbind(CallbackHandle<T> handle) {
-    std::lock_guard<std::mutex> lock(room_member_impl->callback_mutex);
+    std::lock_guard lock(room_member_impl->callback_mutex);
     room_member_impl->callbacks.Get<T>().erase(handle);
 }
 

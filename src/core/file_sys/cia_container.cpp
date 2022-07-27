@@ -30,6 +30,16 @@ Loader::ResultStatus CIAContainer::Load(const FileBackend& backend) {
     if (result != Loader::ResultStatus::Success)
         return result;
 
+    // Load Ticket
+    std::vector<u8> ticket_data(cia_header.tik_size);
+    read_result = backend.Read(GetTicketOffset(), cia_header.tik_size, ticket_data.data());
+    if (read_result.Failed() || *read_result != cia_header.tik_size)
+        return Loader::ResultStatus::Error;
+
+    result = LoadTicket(ticket_data);
+    if (result != Loader::ResultStatus::Success)
+        return result;
+
     // Load Title Metadata
     std::vector<u8> tmd_data(cia_header.tmd_size);
     read_result = backend.Read(GetTitleMetadataOffset(), cia_header.tmd_size, tmd_data.data());
@@ -69,6 +79,16 @@ Loader::ResultStatus CIAContainer::Load(const std::string& filepath) {
     if (result != Loader::ResultStatus::Success)
         return result;
 
+    // Load Ticket
+    std::vector<u8> ticket_data(cia_header.tik_size);
+    file.Seek(GetTicketOffset(), SEEK_SET);
+    if (file.ReadBytes(ticket_data.data(), cia_header.tik_size) != cia_header.tik_size)
+        return Loader::ResultStatus::Error;
+
+    result = LoadTicket(ticket_data);
+    if (result != Loader::ResultStatus::Success)
+        return result;
+
     // Load Title Metadata
     std::vector<u8> tmd_data(cia_header.tmd_size);
     file.Seek(GetTitleMetadataOffset(), SEEK_SET);
@@ -96,6 +116,11 @@ Loader::ResultStatus CIAContainer::Load(const std::string& filepath) {
 
 Loader::ResultStatus CIAContainer::Load(const std::vector<u8>& file_data) {
     Loader::ResultStatus result = LoadHeader(file_data);
+    if (result != Loader::ResultStatus::Success)
+        return result;
+
+    // Load Ticket
+    result = LoadTicket(file_data, GetTicketOffset());
     if (result != Loader::ResultStatus::Success)
         return result;
 
@@ -181,10 +206,10 @@ u64 CIAContainer::GetMetadataOffset() const {
     return offset;
 }
 
-u64 CIAContainer::GetContentOffset(u16 index) const {
+u64 CIAContainer::GetContentOffset(std::size_t index) const {
     u64 offset =
         Common::AlignUp(GetTitleMetadataOffset() + cia_header.tmd_size, CIA_SECTION_ALIGNMENT);
-    for (u16 i = 0; i < index; i++) {
+    for (std::size_t i = 0; i < index; i++) {
         offset += GetContentSize(i);
     }
     return offset;
@@ -210,10 +235,11 @@ u64 CIAContainer::GetTotalContentSize() const {
     return cia_header.content_size;
 }
 
-u64 CIAContainer::GetContentSize(u16 index) const {
+u64 CIAContainer::GetContentSize(std::size_t index) const {
     // If the content doesn't exist in the CIA, it doesn't have a size.
-    if (!cia_header.isContentPresent(index))
+    if (!cia_header.IsContentPresent(index)) {
         return 0;
+    }
 
     return cia_tmd.GetContentSizeByIndex(index);
 }

@@ -953,6 +953,9 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
 #define INC_PC(l) ptr += sizeof(arm_inst) + l
 #define INC_PC_STUB ptr += sizeof(arm_inst)
 
+#ifdef ANDROID
+#define GDB_BP_CHECK
+#else
 #define GDB_BP_CHECK                                                                               \
     cpu->Cpsr &= ~(1 << 5);                                                                        \
     cpu->Cpsr |= cpu->TFlag << 5;                                                                  \
@@ -965,6 +968,7 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
             goto END;                                                                              \
         }                                                                                          \
     }
+#endif
 
 // GCC and Clang have a C++ extension to support a lookup table of labels. Otherwise, fallback to a
 // clunky switch statement.
@@ -1652,11 +1656,13 @@ DISPATCH : {
             goto END;
     }
 
+#ifndef ANDROID
     // Find breakpoint if one exists within the block
     if (GDBStub::IsConnected()) {
         breakpoint_data =
             GDBStub::GetNextBreakpointFromAddress(cpu->Reg[15], GDBStub::BreakpointType::Execute);
     }
+#endif
 
     inst_base = (arm_inst*)&trans_cache_buf[ptr];
     GOTO_NEXT_INST;
@@ -3586,7 +3592,7 @@ STM_INST : {
                 cpu->WriteMemory32(addr, cpu->Reg[15] + 8);
             }
         } else {
-            for (int i = 0; i < 15; i++) {
+            for (unsigned int i = 0; i < 15; i++) {
                 if (BIT(inst_cream->inst, i)) {
                     if (i == Rn)
                         cpu->WriteMemory32(addr, old_RN);
@@ -3865,7 +3871,7 @@ SWI_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         DEBUG_ASSERT(cpu->system != nullptr);
         swi_inst* const inst_cream = (swi_inst*)inst_base->component;
-        cpu->system->CoreTiming().AddTicks(num_instrs);
+        cpu->system->GetRunningCore().GetTimer().AddTicks(num_instrs);
         cpu->NumInstrsToExecute =
             num_instrs >= cpu->NumInstrsToExecute ? 0 : cpu->NumInstrsToExecute - num_instrs;
         num_instrs = 0;

@@ -25,7 +25,7 @@ QtKeyboardValidator::State QtKeyboardValidator::validate(QString& input, int& po
 QtKeyboardDialog::QtKeyboardDialog(QWidget* parent, QtKeyboard* keyboard_)
     : QDialog(parent), keyboard(keyboard_) {
     using namespace Frontend;
-    KeyboardConfig config = keyboard->config;
+    const auto config = keyboard->config;
     layout = new QVBoxLayout;
     label = new QLabel(QString::fromStdString(config.hint_text));
     line_edit = new QLineEdit;
@@ -34,33 +34,21 @@ QtKeyboardDialog::QtKeyboardDialog(QWidget* parent, QtKeyboard* keyboard_)
     // Initialize buttons
     switch (config.button_config) {
     case ButtonConfig::Triple:
-        buttons->addButton(config.has_custom_button_text
-                               ? QString::fromStdString(config.button_text[2])
-                               : tr(BUTTON_OKAY),
-                           QDialogButtonBox::ButtonRole::AcceptRole);
-        buttons->addButton(config.has_custom_button_text
-                               ? QString::fromStdString(config.button_text[1])
-                               : tr(BUTTON_FORGOT),
+        buttons->addButton(config.button_text[1].empty()
+                               ? tr(SWKBD_BUTTON_FORGOT)
+                               : QString::fromStdString(config.button_text[1]),
                            QDialogButtonBox::ButtonRole::HelpRole);
-        buttons->addButton(config.has_custom_button_text
-                               ? QString::fromStdString(config.button_text[0])
-                               : tr(BUTTON_CANCEL),
-                           QDialogButtonBox::ButtonRole::RejectRole);
-        break;
+        [[fallthrough]];
     case ButtonConfig::Dual:
-        buttons->addButton(config.has_custom_button_text
-                               ? QString::fromStdString(config.button_text[1])
-                               : tr(BUTTON_OKAY),
-                           QDialogButtonBox::ButtonRole::AcceptRole);
-        buttons->addButton(config.has_custom_button_text
-                               ? QString::fromStdString(config.button_text[0])
-                               : tr(BUTTON_CANCEL),
+        buttons->addButton(config.button_text[0].empty()
+                               ? tr(SWKBD_BUTTON_CANCEL)
+                               : QString::fromStdString(config.button_text[0]),
                            QDialogButtonBox::ButtonRole::RejectRole);
-        break;
+        [[fallthrough]];
     case ButtonConfig::Single:
-        buttons->addButton(config.has_custom_button_text
-                               ? QString::fromStdString(config.button_text[0])
-                               : tr(BUTTON_OKAY),
+        buttons->addButton(config.button_text[2].empty()
+                               ? tr(SWKBD_BUTTON_OKAY)
+                               : QString::fromStdString(config.button_text[2]),
                            QDialogButtonBox::ButtonRole::AcceptRole);
         break;
     case ButtonConfig::None:
@@ -109,21 +97,34 @@ void QtKeyboardDialog::HandleValidationError(Frontend::ValidationError error) {
 
 QtKeyboard::QtKeyboard(QWidget& parent_) : parent(parent_) {}
 
-void QtKeyboard::Setup(const Frontend::KeyboardConfig* config) {
-    SoftwareKeyboard::Setup(config);
+void QtKeyboard::Execute(const Frontend::KeyboardConfig& config) {
+    SoftwareKeyboard::Execute(config);
     if (this->config.button_config != Frontend::ButtonConfig::None) {
         ok_id = static_cast<u8>(this->config.button_config);
     }
     QMetaObject::invokeMethod(this, "OpenInputDialog", Qt::BlockingQueuedConnection);
+    Finalize(result_text, result_button);
+}
+
+void QtKeyboard::ShowError(const std::string& error) {
+    QString message = QString::fromStdString(error);
+    QMetaObject::invokeMethod(this, "ShowErrorDialog", Qt::BlockingQueuedConnection,
+                              Q_ARG(QString, message));
 }
 
 void QtKeyboard::OpenInputDialog() {
     QtKeyboardDialog dialog(&parent, this);
-    dialog.setWindowFlags(Qt::Dialog | Qt::CustomizeWindowHint | Qt::WindowTitleHint |
-                          Qt::WindowSystemMenuHint | Qt::WindowCloseButtonHint);
+    dialog.setWindowFlags(dialog.windowFlags() &
+                          ~(Qt::WindowCloseButtonHint | Qt::WindowContextHelpButtonHint));
     dialog.setWindowModality(Qt::WindowModal);
     dialog.exec();
-    LOG_INFO(Frontend, "SWKBD input dialog finished, text={}, button={}", dialog.text.toStdString(),
-             dialog.button);
-    Finalize(dialog.text.toStdString(), dialog.button);
+
+    result_text = dialog.text.toStdString();
+    result_button = dialog.button;
+    LOG_INFO(Frontend, "SWKBD input dialog finished, text={}, button={}", result_text,
+             result_button);
+}
+
+void QtKeyboard::ShowErrorDialog(QString message) {
+    QMessageBox::critical(&parent, tr("Software Keyboard"), message);
 }

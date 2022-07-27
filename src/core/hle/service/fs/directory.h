@@ -4,8 +4,8 @@
 
 #pragma once
 
+#include <memory>
 #include "core/file_sys/archive_backend.h"
-#include "core/hle/kernel/kernel.h"
 #include "core/hle/service/service.h"
 
 namespace Service::FS {
@@ -25,6 +25,15 @@ public:
 protected:
     void Read(Kernel::HLERequestContext& ctx);
     void Close(Kernel::HLERequestContext& ctx);
+
+private:
+    Directory();
+
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int);
+    friend class boost::serialization::access;
 };
 
 } // namespace Service::FS
+
+BOOST_CLASS_EXPORT_KEY(Service::FS::Directory)

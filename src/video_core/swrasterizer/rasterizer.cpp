@@ -323,7 +323,10 @@ static void ProcessTriangleInternal(const Vertex& v0, const Vertex& v1, const Ve
                 if (!texture.enabled)
                     continue;
 
-                DEBUG_ASSERT(0 != texture.config.address);
+                if (texture.config.address == 0) {
+                    texture_color[i] = {0, 0, 0, 255};
+                    continue;
+                }
 
                 int coordinate_i =
                     (i == 2 && regs.texturing.main_config.texture2_use_coord1) ? 1 : i;
@@ -847,7 +850,7 @@ static void ProcessTriangleInternal(const Vertex& v0, const Vertex& v1, const Ve
                         return std::min(combiner_output.a(), static_cast<u8>(255 - dest.a()));
 
                     default:
-                        LOG_CRITICAL(HW_GPU, "Unknown blend factor {:x}", static_cast<u32>(factor));
+                        LOG_CRITICAL(HW_GPU, "Unknown blend factor {:x}", factor);
                         UNIMPLEMENTED();
                         break;
                     }

@@ -4,10 +4,14 @@
 
 #pragma once
 
+#include <array>
+#include <memory>
 #include <vector>
+#include "common/archives.h"
 #include "common/common_funcs.h"
 #include "common/common_types.h"
 #include "common/swap.h"
+#include "core/global.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/service/service.h"
 
@@ -41,6 +45,8 @@ struct CaptureBufferInfo {
 };
 static_assert(sizeof(CaptureBufferInfo) == 0x20, "CaptureBufferInfo struct has incorrect size");
 
+constexpr std::size_t SysMenuArgSize = 0x40;
+
 enum class StartupArgumentType : u32 {
     OtherApp = 0,
     Restart = 1,
@@ -59,10 +65,36 @@ public:
     explicit Module(Core::System& system);
     ~Module();
 
-    class Interface : public ServiceFramework<Interface> {
+    std::shared_ptr<AppletManager> GetAppletManager() const;
+
+    class NSInterface : public ServiceFramework<NSInterface> {
     public:
-        Interface(std::shared_ptr<Module> apt, const char* name, u32 max_session);
-        ~Interface();
+        NSInterface(std::shared_ptr<Module> apt, const char* name, u32 max_session);
+        ~NSInterface();
+
+        std::shared_ptr<Module> GetModule() const;
+
+    protected:
+        std::shared_ptr<Module> apt;
+
+        /**
+         * NS::SetWirelessRebootInfo service function. This sets the wireless reboot info.
+         * Inputs:
+         *     1 : size
+         *     2 : (Size<<14) | 2
+         *     3 : Wireless reboot info buffer ptr
+         * Outputs:
+         *     0 : Result of function, 0 on success, otherwise error code
+         */
+        void SetWirelessRebootInfo(Kernel::HLERequestContext& ctx);
+    };
+
+    class APTInterface : public ServiceFramework<APTInterface> {
+    public:
+        APTInterface(std::shared_ptr<Module> apt, const char* name, u32 max_session);
+        ~APTInterface();
+
+        std::shared_ptr<Module> GetModule() const;
 
     protected:
         /**
@@ -123,6 +155,16 @@ public:
          *      5 : Output buffer address
          */
         void Unwrap(Kernel::HLERequestContext& ctx);
+
+        /**
+         * APT::GetWirelessRebootInfo service function
+         *  Inputs:
+         *      1 : size
+         *  Outputs:
+         *      1 : Result of function, 0 on success, otherwise error code
+         *      2 : Output parameter buffer ptr
+         */
+        void GetWirelessRebootInfo(Kernel::HLERequestContext& ctx);
 
         /**
          * APT::NotifyToWait service function
@@ -470,6 +512,23 @@ public:
         void GetProgramIdOnApplicationJump(Kernel::HLERequestContext& ctx);
 
         /**
+         * APT::ReceiveDeliverArg service function
+         *  Inputs:
+         *      0 : Command header [0x00350080]
+         *      1 : Parameter Size (capped to 0x300)
+         *      2 : HMAC Size (capped to 0x20)
+         *     64 : (Parameter Size << 14) | 2
+         *     65 : Output buffer for Parameter
+         *     66 : (HMAC Size << 14) | 0x802
+         *     67 : Output buffer for HMAC
+         *  Outputs:
+         *      1 : Result of function, 0 on success, otherwise error code
+         *    2-3 : Source program id
+         *      4 : u8, whether the arg is received (0 = not received, 1 = received)
+         */
+        void ReceiveDeliverArg(Kernel::HLERequestContext& ctx);
+
+        /**
          * APT::CancelLibraryApplet service function
          *  Inputs:
          *      0 : Command header [0x003B0040]
@@ -509,6 +568,32 @@ public:
         void CloseLibraryApplet(Kernel::HLERequestContext& ctx);
 
         /**
+         * APT::LoadSysMenuArg service function
+         *  Inputs:
+         *      0 : Command header [0x00360040]
+         *      1 : Buffer size
+         *  Outputs:
+         *      0 : Header code
+         *      1 : Result code
+         *     64 : Size << 14 | 2
+         *     65 : void* Output Buffer
+         */
+        void LoadSysMenuArg(Kernel::HLERequestContext& ctx);
+
+        /**
+         * APT::StoreSysMenuArg service function
+         *  Inputs:
+         *      0 : Command header [0x00370042]
+         *      1 : Buffer size
+         *      2 : (Size << 14) | 2
+         *      3 : Input buffer virtual address
+         *  Outputs:
+         *      0 : Header code
+         *      1 : Result code
+         */
+        void StoreSysMenuArg(Kernel::HLERequestContext& ctx);
+
+        /**
          * APT::SendCaptureBufferInfo service function
          *  Inputs:
          *      0 : Command header [0x00400042]
@@ -534,6 +619,20 @@ public:
          *      2 : Actual Size
          */
         void ReceiveCaptureBufferInfo(Kernel::HLERequestContext& ctx);
+
+        /**
+         * APT::GetCaptureInfo service function
+         *  Inputs:
+         *      0 : Command header [0x004A0040]
+         *      1 : Size
+         *      64 : Size << 14 | 2
+         *      65 : void*, CaptureBufferInfo
+         *  Outputs:
+         *      0 : Header code
+         *      1 : Result code
+         *      2 : Actual Size
+         */
+        void GetCaptureInfo(Kernel::HLERequestContext& ctx);
 
         /**
          * APT::GetStartupArgument service function
@@ -591,9 +690,37 @@ public:
          */
         void CheckNew3DS(Kernel::HLERequestContext& ctx);
 
-    private:
-        std::shared_ptr<Module> apt;
+        /**
+         * APT::Unknown0x0103 service function. Determines whether Smash 4 allows C-Stick
+         *  Outputs:
+         *      1: Result code, 0 on success otherwise error code
+         *      2: u8 output: 2 = New3DS+valid/initialized (in Smash 4), 1 = Old3DS or invalid
+         */
+        void Unknown0x0103(Kernel::HLERequestContext& ctx);
+
+        /**
+         * APT::IsTitleAllowed service function
+         *  Inputs:
+         *      0 : Header Code[0x01050100]
+         *    1-2 : Program id
+         *      3 : Media type
+         *      4 : Padding
+         *  Outputs:
+         *      1: Result code, 0 on success, otherwise error code
+         *      2: u8 output, 0 if the title is not allowed, 1 if it is
+         */
+        void IsTitleAllowed(Kernel::HLERequestContext& ctx);
+
+    protected:
         bool application_reset_prepared{};
+        std::shared_ptr<Module> apt;
+
+    private:
+        template <class Archive>
+        void serialize(Archive& ar, const unsigned int) {
+            ar& application_reset_prepared;
+        }
+        friend class boost::serialization::access;
     };
 
 private:
@@ -603,11 +730,11 @@ private:
     Core::System& system;
 
     /// Handle to shared memory region designated to for shared system font
-    Kernel::SharedPtr<Kernel::SharedMemory> shared_font_mem;
+    std::shared_ptr<Kernel::SharedMemory> shared_font_mem;
     bool shared_font_loaded = false;
     bool shared_font_relocated = false;
 
-    Kernel::SharedPtr<Kernel::Mutex> lock;
+    std::shared_ptr<Kernel::Mutex> lock;
 
     u32 cpu_percent = 0; ///< CPU time available to the running application
 
@@ -615,13 +742,25 @@ private:
     u8 unknown_ns_state_field = 0;
 
     std::vector<u8> screen_capture_buffer;
+    std::array<u8, SysMenuArgSize> sys_menu_arg_buffer;
 
     ScreencapPostPermission screen_capture_post_permission =
         ScreencapPostPermission::CleanThePermission; // TODO(JamePeng): verify the initial value
 
     std::shared_ptr<AppletManager> applet_manager;
+
+    std::vector<u8> wireless_reboot_info;
+
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int);
+    friend class boost::serialization::access;
 };
+
+std::shared_ptr<Module> GetModule(Core::System& system);
 
 void InstallInterfaces(Core::System& system);
 
 } // namespace Service::APT
+
+SERVICE_CONSTRUCT(Service::APT::Module)
+BOOST_CLASS_VERSION(Service::APT::Module, 1)

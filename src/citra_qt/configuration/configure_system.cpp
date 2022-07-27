@@ -2,9 +2,10 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <cstring>
 #include <QMessageBox>
 #include "citra_qt/configuration/configure_system.h"
-#include "citra_qt/ui_settings.h"
+#include "citra_qt/uisettings.h"
 #include "core/core.h"
 #include "core/hle/service/cfg/cfg.h"
 #include "core/hle/service/ptm/ptm.h"
@@ -216,7 +217,19 @@ static const std::array<const char*, 187> country_names = {
     QT_TRANSLATE_NOOP("ConfigureSystem", "Bermuda"), // 180-186
 };
 
-ConfigureSystem::ConfigureSystem(QWidget* parent) : QWidget(parent), ui(new Ui::ConfigureSystem) {
+// The QSlider doesn't have an easy way to set a custom step amount,
+// so we can just convert from the sliders range (0 - 79) to the expected
+// settings range (5 - 400) with simple math.
+static constexpr int SliderToSettings(int value) {
+    return 5 * value + 5;
+}
+
+static constexpr int SettingsToSlider(int value) {
+    return (value - 5) / 5;
+}
+
+ConfigureSystem::ConfigureSystem(QWidget* parent)
+    : QWidget(parent), ui(std::make_unique<Ui::ConfigureSystem>()) {
     ui->setupUi(this);
     connect(ui->combo_birthmonth,
             static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged), this,
@@ -227,17 +240,25 @@ ConfigureSystem::ConfigureSystem(QWidget* parent) : QWidget(parent), ui(new Ui::
     connect(ui->button_regenerate_console_id, &QPushButton::clicked, this,
             &ConfigureSystem::RefreshConsoleID);
     for (u8 i = 0; i < country_names.size(); i++) {
-        if (country_names.at(i) != "") {
+        if (std::strcmp(country_names.at(i), "") != 0) {
             ui->combo_country->addItem(tr(country_names.at(i)), i);
         }
     }
+
+    // Set a minimum width for the label to prevent the slider from changing size.
+    // This scales across DPIs. (This value should be enough for "xxx%")
+    ui->clock_display_label->setMinimumWidth(40);
+
+    connect(ui->slider_clock_speed, &QSlider::valueChanged, [&](int value) {
+        ui->clock_display_label->setText(QStringLiteral("%1%").arg(SliderToSettings(value)));
+    });
 
     ConfigureTime();
 }
 
 ConfigureSystem::~ConfigureSystem() = default;
 
-void ConfigureSystem::setConfiguration() {
+void ConfigureSystem::SetConfiguration() {
     enabled = !Core::System::GetInstance().IsPoweredOn();
 
     ui->combo_init_clock->setCurrentIndex(static_cast<u8>(Settings::values.init_clock));
@@ -257,6 +278,12 @@ void ConfigureSystem::setConfiguration() {
 
         ui->label_disable_info->hide();
     }
+
+    ui->slider_clock_speed->setValue(SettingsToSlider(Settings::values.cpu_clock_percentage));
+    ui->clock_display_label->setText(
+        QStringLiteral("%1%").arg(Settings::values.cpu_clock_percentage));
+
+    ui->toggle_new_3ds->setChecked(Settings::values.is_new_3ds);
 }
 
 void ConfigureSystem::ReadSystemSettings() {
@@ -297,64 +324,68 @@ void ConfigureSystem::ReadSystemSettings() {
     ui->spinBox_play_coins->setValue(play_coin);
 }
 
-void ConfigureSystem::applyConfiguration() {
-    if (!enabled)
-        return;
+void ConfigureSystem::ApplyConfiguration() {
+    if (enabled) {
+        bool modified = false;
 
-    bool modified = false;
+        // apply username
+        // TODO(wwylele): Use this when we move to Qt 5.5
+        // std::u16string new_username = ui->edit_username->text().toStdU16String();
+        std::u16string new_username(
+            reinterpret_cast<const char16_t*>(ui->edit_username->text().utf16()));
+        if (new_username != username) {
+            cfg->SetUsername(new_username);
+            modified = true;
+        }
 
-    // apply username
-    // TODO(wwylele): Use this when we move to Qt 5.5
-    // std::u16string new_username = ui->edit_username->text().toStdU16String();
-    std::u16string new_username(
-        reinterpret_cast<const char16_t*>(ui->edit_username->text().utf16()));
-    if (new_username != username) {
-        cfg->SetUsername(new_username);
-        modified = true;
+        // apply birthday
+        int new_birthmonth = ui->combo_birthmonth->currentIndex() + 1;
+        int new_birthday = ui->combo_birthday->currentIndex() + 1;
+        if (birthmonth != new_birthmonth || birthday != new_birthday) {
+            cfg->SetBirthday(new_birthmonth, new_birthday);
+            modified = true;
+        }
+
+        // apply language
+        int new_language = ui->combo_language->currentIndex();
+        if (language_index != new_language) {
+            cfg->SetSystemLanguage(static_cast<Service::CFG::SystemLanguage>(new_language));
+            modified = true;
+        }
+
+        // apply sound
+        int new_sound = ui->combo_sound->currentIndex();
+        if (sound_index != new_sound) {
+            cfg->SetSoundOutputMode(static_cast<Service::CFG::SoundOutputMode>(new_sound));
+            modified = true;
+        }
+
+        // apply country
+        u8 new_country = static_cast<u8>(ui->combo_country->currentData().toInt());
+        if (country_code != new_country) {
+            cfg->SetCountryCode(new_country);
+            modified = true;
+        }
+
+        // apply play coin
+        u16 new_play_coin = static_cast<u16>(ui->spinBox_play_coins->value());
+        if (play_coin != new_play_coin) {
+            Service::PTM::Module::SetPlayCoins(new_play_coin);
+        }
+
+        // update the config savegame if any item is modified.
+        if (modified) {
+            cfg->UpdateConfigNANDSavegame();
+        }
+
+        Settings::values.init_clock =
+            static_cast<Settings::InitClock>(ui->combo_init_clock->currentIndex());
+        Settings::values.init_time = ui->edit_init_time->dateTime().toTime_t();
+
+        Settings::values.is_new_3ds = ui->toggle_new_3ds->isChecked();
     }
 
-    // apply birthday
-    int new_birthmonth = ui->combo_birthmonth->currentIndex() + 1;
-    int new_birthday = ui->combo_birthday->currentIndex() + 1;
-    if (birthmonth != new_birthmonth || birthday != new_birthday) {
-        cfg->SetBirthday(new_birthmonth, new_birthday);
-        modified = true;
-    }
-
-    // apply language
-    int new_language = ui->combo_language->currentIndex();
-    if (language_index != new_language) {
-        cfg->SetSystemLanguage(static_cast<Service::CFG::SystemLanguage>(new_language));
-        modified = true;
-    }
-
-    // apply sound
-    int new_sound = ui->combo_sound->currentIndex();
-    if (sound_index != new_sound) {
-        cfg->SetSoundOutputMode(static_cast<Service::CFG::SoundOutputMode>(new_sound));
-        modified = true;
-    }
-
-    // apply country
-    u8 new_country = static_cast<u8>(ui->combo_country->currentData().toInt());
-    if (country_code != new_country) {
-        cfg->SetCountryCode(new_country);
-        modified = true;
-    }
-
-    // apply play coin
-    u16 new_play_coin = static_cast<u16>(ui->spinBox_play_coins->value());
-    if (play_coin != new_play_coin) {
-        Service::PTM::Module::SetPlayCoins(new_play_coin);
-    }
-
-    // update the config savegame if any item is modified.
-    if (modified)
-        cfg->UpdateConfigNANDSavegame();
-
-    Settings::values.init_clock =
-        static_cast<Settings::InitClock>(ui->combo_init_clock->currentIndex());
-    Settings::values.init_time = ui->edit_init_time->dateTime().toTime_t();
+    Settings::values.cpu_clock_percentage = SliderToSettings(ui->slider_clock_speed->value());
     Settings::Apply();
 }
 
@@ -386,10 +417,10 @@ void ConfigureSystem::UpdateBirthdayComboBox(int birthmonth_index) {
 void ConfigureSystem::ConfigureTime() {
     ui->edit_init_time->setCalendarPopup(true);
     QDateTime dt;
-    dt.fromString("2000-01-01 00:00:01", "yyyy-MM-dd hh:mm:ss");
+    dt.fromString(QStringLiteral("2000-01-01 00:00:01"), QStringLiteral("yyyy-MM-dd hh:mm:ss"));
     ui->edit_init_time->setMinimumDateTime(dt);
 
-    this->setConfiguration();
+    SetConfiguration();
 
     UpdateInitTime(ui->combo_init_clock->currentIndex());
 }
@@ -409,17 +440,17 @@ void ConfigureSystem::RefreshConsoleID() {
                               "if you use an outdated config savegame. Continue?");
     reply = QMessageBox::critical(this, tr("Warning"), warning_text,
                                   QMessageBox::No | QMessageBox::Yes);
-    if (reply == QMessageBox::No)
+    if (reply == QMessageBox::No) {
         return;
-    u32 random_number;
-    u64 console_id;
-    cfg->GenerateConsoleUniqueId(random_number, console_id);
+    }
+
+    const auto [random_number, console_id] = cfg->GenerateConsoleUniqueId();
     cfg->SetConsoleUniqueId(random_number, console_id);
     cfg->UpdateConfigNANDSavegame();
     ui->label_console_id->setText(
         tr("Console ID: 0x%1").arg(QString::number(console_id, 16).toUpper()));
 }
 
-void ConfigureSystem::retranslateUi() {
+void ConfigureSystem::RetranslateUI() {
     ui->retranslateUi(this);
 }

@@ -7,6 +7,8 @@
 #include "audio_core/sink.h"
 #include "audio_core/sink_details.h"
 #include "common/assert.h"
+#include "core/core.h"
+#include "core/dumping/backend.h"
 #include "core/settings.h"
 
 namespace AudioCore {
@@ -36,11 +38,15 @@ void DspInterface::EnableStretching(bool enable) {
     perform_time_stretching = enable;
 }
 
-void DspInterface::OutputFrame(StereoFrame16& frame) {
+void DspInterface::OutputFrame(StereoFrame16 frame) {
     if (!sink)
         return;
 
     fifo.Push(frame.data(), frame.size());
+
+    if (Core::System::GetInstance().VideoDumper().IsDumping()) {
+        Core::System::GetInstance().VideoDumper().AddAudioFrame(std::move(frame));
+    }
 }
 
 void DspInterface::OutputSample(std::array<s16, 2> sample) {
@@ -48,6 +54,10 @@ void DspInterface::OutputSample(std::array<s16, 2> sample) {
         return;
 
     fifo.Push(&sample, 1);
+
+    if (Core::System::GetInstance().VideoDumper().IsDumping()) {
+        Core::System::GetInstance().VideoDumper().AddAudioSample(std::move(sample));
+    }
 }
 
 void DspInterface::OutputCallback(s16* buffer, std::size_t num_frames) {
@@ -74,11 +84,11 @@ void DspInterface::OutputCallback(s16* buffer, std::size_t num_frames) {
         std::memcpy(buffer + 2 * i, &last_frame[0], 2 * sizeof(s16));
     }
 
-    // Implementation of the hardware volume slider with a dynamic range of 60 dB
+    // Implementation of the hardware volume slider
+    // A cubic curve is used to approximate a linear change in human-perceived loudness
     const float linear_volume = std::clamp(Settings::values.volume, 0.0f, 1.0f);
     if (linear_volume != 1.0) {
-        const float volume_scale_factor =
-            linear_volume == 0 ? 0 : std::exp(6.90775f * linear_volume) * 0.001f;
+        const float volume_scale_factor = linear_volume * linear_volume * linear_volume;
         for (std::size_t i = 0; i < num_frames; i++) {
             buffer[i * 2 + 0] = static_cast<s16>(buffer[i * 2 + 0] * volume_scale_factor);
             buffer[i * 2 + 1] = static_cast<s16>(buffer[i * 2 + 1] * volume_scale_factor);

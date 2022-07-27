@@ -4,11 +4,11 @@
 
 #pragma once
 
+#include <memory>
 #include "common/common_funcs.h"
 #include "common/common_types.h"
 #include "core/frontend/applets/swkbd.h"
 #include "core/hle/applets/applet.h"
-#include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/shared_memory.h"
 #include "core/hle/result.h"
 #include "core/hle/service/apt/apt.h"
@@ -161,7 +161,7 @@ struct SoftwareKeyboardConfig {
     u32_le text_offset; ///< Offset in the SharedMemory where the output text starts
     u16_le text_length; ///< Length in characters of the output text
 
-    s32_le callback_result;
+    enum_le<SoftwareKeyboardCallbackResult> callback_result;
     std::array<u16_le, MAX_CALLBACK_MSG_LEN + 1> callback_msg;
     bool skip_at_check;
     INSERT_PADDING_BYTES(0xAB);
@@ -199,10 +199,10 @@ private:
     /// This SharedMemory will be created when we receive the LibAppJustStarted message.
     /// It holds the framebuffer info retrieved by the application with
     /// GSPGPU::ImportDisplayCaptureInfo
-    Kernel::SharedPtr<Kernel::SharedMemory> framebuffer_memory;
+    std::shared_ptr<Kernel::SharedMemory> framebuffer_memory;
 
     /// SharedMemory where the output text will be stored
-    Kernel::SharedPtr<Kernel::SharedMemory> text_memory;
+    std::shared_ptr<Kernel::SharedMemory> text_memory;
 
     /// Configuration of this instance of the SoftwareKeyboard, as received from the application
     SoftwareKeyboardConfig config;

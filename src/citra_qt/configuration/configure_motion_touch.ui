@@ -67,6 +67,24 @@
         </item>
        </layout>
       </item>
+      <item>
+       <layout class="QHBoxLayout">
+        <item>
+         <widget class="QLabel" name="motion_controller_label">
+          <property name="text">
+           <string>Controller:</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="motion_controller_button">
+          <property name="text">
+           <string>Configure</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
      </layout>
     </widget>
    </item>
@@ -111,6 +129,39 @@
         </item>
         <item>
          <widget class="QPushButton" name="touch_calibration_config">
+          <property name="sizePolicy">
+           <sizepolicy hsizetype="Maximum" vsizetype="Fixed">
+            <horstretch>0</horstretch>
+            <verstretch>0</verstretch>
+           </sizepolicy>
+          </property>
+          <property name="text">
+           <string>Configure</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <layout class="QHBoxLayout">
+        <item>
+         <widget class="QCheckBox" name="touch_from_button_checkbox">
+          <property name="sizePolicy">
+           <sizepolicy hsizetype="Maximum" vsizetype="Fixed">
+            <horstretch>0</horstretch>
+            <verstretch>0</verstretch>
+           </sizepolicy>
+          </property>
+          <property name="text">
+           <string>Use button mapping:</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QComboBox" name="touch_from_button_map"/>
+        </item>
+        <item>
+         <widget class="QPushButton" name="touch_from_button_config_btn">
           <property name="sizePolicy">
            <sizepolicy hsizetype="Maximum" vsizetype="Fixed">
             <horstretch>0</horstretch>
@@ -278,7 +329,7 @@
    <sender>buttonBox</sender>
    <signal>accepted()</signal>
    <receiver>ConfigureMotionTouch</receiver>
-   <slot>applyConfiguration()</slot>
+   <slot>ApplyConfiguration()</slot>
    <hints>
     <hint type="sourcelabel">
      <x>220</x>

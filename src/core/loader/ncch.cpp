@@ -21,6 +21,7 @@
 #include "core/hle/service/am/am.h"
 #include "core/hle/service/cfg/cfg.h"
 #include "core/hle/service/fs/archive.h"
+#include "core/hle/service/fs/fs_user.h"
 #include "core/loader/ncch.h"
 #include "core/loader/smdh.h"
 #include "core/memory.h"
@@ -61,9 +62,21 @@ std::pair<std::optional<u32>, ResultStatus> AppLoader_NCCH::LoadKernelSystemMode
                           ResultStatus::Success);
 }
 
-ResultStatus AppLoader_NCCH::LoadExec(Kernel::SharedPtr<Kernel::Process>& process) {
+std::pair<std::optional<u8>, ResultStatus> AppLoader_NCCH::LoadKernelN3dsMode() {
+    if (!is_loaded) {
+        ResultStatus res = base_ncch.Load();
+        if (res != ResultStatus::Success) {
+            return std::make_pair(std::optional<u8>{}, res);
+        }
+    }
+
+    // Set the system mode as the one from the exheader.
+    return std::make_pair(overlay_ncch->exheader_header.arm11_system_local_caps.n3ds_mode,
+                          ResultStatus::Success);
+}
+
+ResultStatus AppLoader_NCCH::LoadExec(std::shared_ptr<Kernel::Process>& process) {
     using Kernel::CodeSet;
-    using Kernel::SharedPtr;
 
     if (!is_loaded)
         return ResultStatus::ErrorNotLoaded;
@@ -75,7 +88,7 @@ ResultStatus AppLoader_NCCH::LoadExec(Kernel::SharedPtr<Kernel::Process>& proces
         std::string process_name = Common::StringFromFixedZeroTerminatedBuffer(
             (const char*)overlay_ncch->exheader_header.codeset_info.name, 8);
 
-        SharedPtr<CodeSet> codeset =
+        std::shared_ptr<CodeSet> codeset =
             Core::System::GetInstance().Kernel().CreateCodeSet(process_name, program_id);
 
         codeset->CodeSegment().offset = 0;
@@ -101,8 +114,13 @@ ResultStatus AppLoader_NCCH::LoadExec(Kernel::SharedPtr<Kernel::Process>& proces
             overlay_ncch->exheader_header.codeset_info.data.num_max_pages * Memory::PAGE_SIZE +
             bss_page_size;
 
+        // Apply patches now that the entire codeset (including .bss) has been allocated
+        const ResultStatus patch_result = overlay_ncch->ApplyCodePatch(code);
+        if (patch_result != ResultStatus::Success && patch_result != ResultStatus::ErrorNotUsed)
+            return patch_result;
+
         codeset->entrypoint = codeset->CodeSegment().addr;
-        codeset->memory = std::make_shared<std::vector<u8>>(std::move(code));
+        codeset->memory = std::move(code);
 
         process = Core::System::GetInstance().Kernel().CreateProcess(std::move(codeset));
 
@@ -117,14 +135,21 @@ ResultStatus AppLoader_NCCH::LoadExec(Kernel::SharedPtr<Kernel::Process>& proces
             overlay_ncch->exheader_header.arm11_system_local_caps.ideal_processor;
 
         // Copy data while converting endianness
-        std::array<u32, ARRAY_SIZE(overlay_ncch->exheader_header.arm11_kernel_caps.descriptors)>
-            kernel_caps;
+        using KernelCaps = std::array<u32, ExHeader_ARM11_KernelCaps::NUM_DESCRIPTORS>;
+        KernelCaps kernel_caps;
         std::copy_n(overlay_ncch->exheader_header.arm11_kernel_caps.descriptors, kernel_caps.size(),
                     begin(kernel_caps));
         process->ParseKernelCaps(kernel_caps.data(), kernel_caps.size());
 
         s32 priority = overlay_ncch->exheader_header.arm11_system_local_caps.priority;
         u32 stack_size = overlay_ncch->exheader_header.codeset_info.stack_size;
+
+        // On real HW this is done with FS:Reg, but we can be lazy
+        auto fs_user =
+            Core::System::GetInstance().ServiceManager().GetService<Service::FS::FS_USER>(
+                "fs:USER");
+        fs_user->Register(process->process_id, process->codeset->program_id, filepath);
+
         process->Run(priority, stack_size);
         return ResultStatus::Success;
     }
@@ -151,7 +176,7 @@ void AppLoader_NCCH::ParseRegionLockoutInfo() {
     }
 }
 
-ResultStatus AppLoader_NCCH::Load(Kernel::SharedPtr<Kernel::Process>& process) {
+ResultStatus AppLoader_NCCH::Load(std::shared_ptr<Kernel::Process>& process) {
     u64_le ncch_program_id;
 
     if (is_loaded)
@@ -173,7 +198,9 @@ ResultStatus AppLoader_NCCH::Load(Kernel::SharedPtr<Kernel::Process>& process) {
         overlay_ncch = &update_ncch;
     }
 
-    Core::Telemetry().AddField(Telemetry::FieldType::Session, "ProgramId", program_id);
+    auto& system = Core::System::GetInstance();
+    system.TelemetrySession().AddField(Common::Telemetry::FieldType::Session, "ProgramId",
+                                       program_id);
 
     if (auto room_member = Network::GetRoomMember().lock()) {
         Network::GameInfo game_info;
@@ -188,10 +215,19 @@ ResultStatus AppLoader_NCCH::Load(Kernel::SharedPtr<Kernel::Process>& process) {
     if (ResultStatus::Success != result)
         return result;
 
-    Core::System::GetInstance().ArchiveManager().RegisterSelfNCCH(*this);
+    system.ArchiveManager().RegisterSelfNCCH(*this);
 
     ParseRegionLockoutInfo();
 
+    return ResultStatus::Success;
+}
+
+ResultStatus AppLoader_NCCH::IsExecutable(bool& out_executable) {
+    Loader::ResultStatus result = overlay_ncch->Load();
+    if (result != Loader::ResultStatus::Success)
+        return result;
+
+    out_executable = overlay_ncch->ncch_header.is_executable != 0;
     return ResultStatus::Success;
 }
 
@@ -238,6 +274,18 @@ ResultStatus AppLoader_NCCH::ReadUpdateRomFS(std::shared_ptr<FileSys::RomFSReade
         return base_ncch.ReadRomFS(romfs_file);
 
     return ResultStatus::Success;
+}
+
+ResultStatus AppLoader_NCCH::DumpRomFS(const std::string& target_path) {
+    return base_ncch.DumpRomFS(target_path);
+}
+
+ResultStatus AppLoader_NCCH::DumpUpdateRomFS(const std::string& target_path) {
+    u64 program_id;
+    ReadProgramId(program_id);
+    update_ncch.OpenFile(
+        Service::AM::GetTitleContentPath(Service::FS::MediaType::SDMC, program_id | UPDATE_MASK));
+    return update_ncch.DumpRomFS(target_path);
 }
 
 ResultStatus AppLoader_NCCH::ReadTitle(std::string& title) {

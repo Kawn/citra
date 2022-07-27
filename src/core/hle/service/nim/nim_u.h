@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <memory>
 #include "core/hle/service/service.h"
 
 namespace Core {
@@ -39,7 +40,17 @@ private:
      */
     void CheckSysUpdateAvailable(Kernel::HLERequestContext& ctx);
 
-    Kernel::SharedPtr<Kernel::Event> nim_system_update_event;
+    std::shared_ptr<Kernel::Event> nim_system_update_event;
+
+    template <class Archive>
+    void serialize(Archive& ar, const unsigned int) {
+        ar& boost::serialization::base_object<Kernel::SessionRequestHandler>(*this);
+        ar& nim_system_update_event;
+    }
+    friend class boost::serialization::access;
 };
 
 } // namespace Service::NIM
+
+SERVICE_CONSTRUCT(Service::NIM::NIM_U)
+BOOST_CLASS_EXPORT_KEY(Service::NIM::NIM_U)

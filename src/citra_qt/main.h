@@ -4,8 +4,8 @@
 
 #pragma once
 
+#include <array>
 #include <memory>
-#include <QLabel>
 #include <QMainWindow>
 #include <QTimer>
 #include <QTranslator>
@@ -14,7 +14,7 @@
 #include "common/announce_multiplayer_room.h"
 #include "core/core.h"
 #include "core/hle/service/am/am.h"
-#include "ui_main.h"
+#include "core/savestate.h"
 
 class AboutDialog;
 class Config;
@@ -30,18 +30,26 @@ class GraphicsBreakPointsWidget;
 class GraphicsTracingWidget;
 class GraphicsVertexShaderWidget;
 class GRenderWindow;
+class IPCRecorderWidget;
 class LLEServiceModulesWidget;
+class LoadingScreen;
 class MicroProfileDialog;
 class MultiplayerState;
 class ProfilerWidget;
 template <typename>
 class QFutureWatcher;
+class QLabel;
 class QProgressBar;
 class RegistersWidget;
 class Updater;
 class WaitTreeWidget;
+
 namespace DiscordRPC {
 class DiscordInterface;
+}
+
+namespace Ui {
+class MainWindow;
 }
 
 class GMainWindow : public QMainWindow {
@@ -68,6 +76,13 @@ public:
     GameList* game_list;
     std::unique_ptr<DiscordRPC::DiscordInterface> discord_rpc;
 
+    bool DropAction(QDropEvent* event);
+    void AcceptDropEvent(QDropEvent* event);
+
+public slots:
+    void OnAppFocusStateChanged(Qt::ApplicationState state);
+    void OnLoadComplete();
+
 signals:
 
     /**
@@ -75,8 +90,8 @@ signals:
      * about to start. At this time, the core system emulation has been initialized, and all
      * emulation handles and memory should be valid.
      *
-     * @param emu_thread Pointer to the newly created EmuThread (to be used by widgets that need to
-     *      access/change emulation state).
+     * @param emu_thread Pointer to the newly created EmuThread (to be used by widgets that need
+     * to access/change emulation state).
      */
     void EmulationStarting(EmuThread* emu_thread);
 
@@ -96,6 +111,7 @@ private:
     void InitializeWidgets();
     void InitializeDebugWidgets();
     void InitializeRecentFileMenuActions();
+    void InitializeSaveStateMenuActions();
 
     void SetDefaultUIGeometry();
     void SyncMenuUISettings();
@@ -103,6 +119,9 @@ private:
 
     void ConnectWidgetEvents();
     void ConnectMenuEvents();
+
+    void PreventOSSleep();
+    void AllowOSSleep();
 
     bool LoadROM(const QString& filename);
     void BootGame(const QString& filename);
@@ -114,6 +133,7 @@ private:
     void ShowNoUpdatePrompt();
     void CheckForUpdates();
     void SetDiscordEnabled(bool state);
+    void LoadAmiibo(const QString& filename);
 
     /**
      * Stores the filename in the recently loaded files list.
@@ -135,6 +155,8 @@ private:
      */
     void UpdateRecentFiles();
 
+    void UpdateSaveStates();
+
     /**
      * If the emulation is running,
      * asks the user if he really want to close the emulator
@@ -149,13 +171,16 @@ private slots:
     void OnStartGame();
     void OnPauseGame();
     void OnStopGame();
+    void OnSaveState();
+    void OnLoadState();
     void OnMenuReportCompatibility();
     /// Called whenever a user selects a game in the game list widget.
     void OnGameListLoadFile(QString game_path);
     void OnGameListOpenFolder(u64 program_id, GameListOpenTarget target);
     void OnGameListNavigateToGamedbEntry(u64 program_id,
                                          const CompatibilityList& compatibility_list);
-    void OnGameListOpenDirectory(QString path);
+    void OnGameListDumpRomFS(QString game_path, u64 program_id);
+    void OnGameListOpenDirectory(const QString& directory);
     void OnGameListAddDirectory();
     void OnGameListShowList(bool show);
     void OnMenuLoadFile();
@@ -175,6 +200,7 @@ private slots:
     void ChangeScreenLayout();
     void ToggleScreenLayout();
     void OnSwapScreens();
+    void OnRotateScreens();
     void OnCheats();
     void ShowFullscreen();
     void HideFullscreen();
@@ -182,8 +208,13 @@ private slots:
     void OnCreateGraphicsSurfaceViewer();
     void OnRecordMovie();
     void OnPlayMovie();
-    void OnStopRecordingPlayback();
+    void OnCloseMovie();
+    void OnSaveMovie();
     void OnCaptureScreenshot();
+#ifdef ENABLE_FFMPEG_VIDEO_DUMPER
+    void OnStartVideoDumping();
+    void OnStopVideoDumping();
+#endif
     void OnCoreError(Core::System::ResultStatus, std::string);
     /// Called whenever a user selects Help->About Citra
     void OnMenuAboutCitra();
@@ -191,21 +222,25 @@ private slots:
     void OnCheckForUpdates();
     void OnOpenUpdater();
     void OnLanguageChanged(const QString& locale);
+    void OnMouseActivity();
 
 private:
-    bool ValidateMovie(const QString& path, u64 program_id = 0);
     Q_INVOKABLE void OnMoviePlaybackCompleted();
     void UpdateStatusBar();
     void LoadTranslation();
-    void SetupUIStrings();
+    void UpdateWindowTitle();
+    void UpdateUISettings();
     void RetranslateStatusBar();
     void InstallCIA(QStringList filepaths);
+    void HideMouseCursor();
+    void ShowMouseCursor();
 
-    Ui::MainWindow ui;
+    std::unique_ptr<Ui::MainWindow> ui;
 
     GRenderWindow* render_window;
 
     GameListPlaceholder* game_list_placeholder;
+    LoadingScreen* loading_screen;
 
     // Status bar elements
     QProgressBar* progress_bar = nullptr;
@@ -214,6 +249,7 @@ private:
     QLabel* game_fps_label = nullptr;
     QLabel* emu_frametime_label = nullptr;
     QTimer status_bar_update_timer;
+    bool message_label_used_for_movie = false;
 
     MultiplayerState* multiplayer_state = nullptr;
     std::unique_ptr<Config> config;
@@ -226,9 +262,24 @@ private:
     // The path to the game currently running
     QString game_path;
 
+    bool auto_paused = false;
+    QTimer mouse_hide_timer;
+
     // Movie
     bool movie_record_on_start = false;
     QString movie_record_path;
+    QString movie_record_author;
+
+    bool movie_playback_on_start = false;
+    QString movie_playback_path;
+
+    // Video dumping
+    bool video_dumping_on_start = false;
+    QString video_dumping_path;
+    // Whether game shutdown is delayed due to video dumping
+    bool game_shutdown_delayed = false;
+    // Whether game was paused due to stopping video dumping
+    bool game_paused_for_dumping = false;
 
     // Debugger panes
     ProfilerWidget* profilerWidget;
@@ -239,6 +290,7 @@ private:
     GraphicsBreakPointsWidget* graphicsBreakpointsWidget;
     GraphicsVertexShaderWidget* graphicsVertexShaderWidget;
     GraphicsTracingWidget* graphicsTracingWidget;
+    IPCRecorderWidget* ipcRecorderWidget;
     LLEServiceModulesWidget* lleServiceModulesWidget;
     WaitTreeWidget* waitTreeWidget;
     Updater* updater;
@@ -247,6 +299,13 @@ private:
     bool defer_update_prompt = false;
 
     QAction* actions_recent_files[max_recent_files_item];
+    std::array<QAction*, Core::SaveStateSlotCount> actions_load_state;
+    std::array<QAction*, Core::SaveStateSlotCount> actions_save_state;
+
+    u32 oldest_slot;
+    u64 oldest_slot_time;
+    u32 newest_slot;
+    u64 newest_slot_time;
 
     QTranslator translator;
 
@@ -259,6 +318,9 @@ protected:
     void dropEvent(QDropEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dragMoveEvent(QDragMoveEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
 };
 
 Q_DECLARE_METATYPE(std::size_t);
