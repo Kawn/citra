@@ -7,7 +7,9 @@
 #include <atomic>
 #include <functional>
 #include "common/common_types.h"
+#include "common/string_util.h"
 #include "core/hw/gpu.h"
+#include "video_core.h"
 
 namespace OpenGL {
 struct ScreenInfo;
@@ -85,9 +87,14 @@ public:
         return false;
     }
 
+
+    virtual void SetRenderHacks(const VideoCore::RenderHacksInput& input) {
+    }
+
     virtual void LoadDiskResources(const std::atomic_bool& stop_loading,
                                    const DiskResourceLoadCallback& callback) {}
 
     virtual void SyncEntireState() {}
+
 };
 } // namespace VideoCore

@@ -68,6 +68,9 @@ public:
     /// Shutdown the renderer
     void ShutDown() override;
 
+
+    void SetRenderHacks(const VideoCore::RenderHacksInput& matrix) override;
+
     /// Finalizes rendering the guest frame
     void SwapBuffers() override;
 
@@ -80,6 +83,7 @@ public:
 
     /// Cleans up after video dumping is ended
     void CleanupVideoDumping() override;
+
 
 private:
     void InitOpenGLObjects();

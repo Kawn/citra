@@ -8,6 +8,9 @@
 #include "core/frontend/emu_window.h"
 #include "core/frontend/input.h"
 #include "core/settings.h"
+#include "input_common/main.h"
+#include "video_core/renderer_base.h"
+#include "video_core/video_core.h"
 
 namespace Frontend {
 
@@ -55,6 +58,18 @@ EmuWindow::EmuWindow() {
 
 EmuWindow::~EmuWindow() {
     Input::UnregisterFactory<Input::TouchDevice>("emu_window");
+}
+
+static bool IsWithinTopScreen(const Layout::FramebufferLayout& layout, float* norm_x, float* norm_y,
+                              unsigned fbx, unsigned fby) {
+    if (fbx >= layout.top_screen.left && fbx < layout.top_screen.right &&
+        fby >= layout.top_screen.top && fby < layout.top_screen.bottom) {
+        *norm_x = fbx - layout.top_screen.left;
+        *norm_y = fby - layout.top_screen.top;
+        return true;
+    } else {
+        return false;
+    }
 }
 
 /**
@@ -112,6 +127,14 @@ std::tuple<unsigned, unsigned> EmuWindow::ClipToTouchScreen(unsigned new_x, unsi
 }
 
 bool EmuWindow::TouchPressed(unsigned framebuffer_x, unsigned framebuffer_y) {
+
+    if (IsWithinTopScreen(framebuffer_layout, &camera_hack_state.tx, &camera_hack_state.ty,
+                          framebuffer_x, framebuffer_y)) {
+        camera_hack_state.lastX = camera_hack_state.tx;
+        camera_hack_state.lastY = camera_hack_state.ty;
+        camera_hack_state.grabbed = true;
+        return;
+    }
     if (!IsWithinTouchscreen(framebuffer_layout, framebuffer_x, framebuffer_y))
         return false;
 
@@ -147,13 +170,170 @@ bool EmuWindow::TouchPressed(unsigned framebuffer_x, unsigned framebuffer_y) {
 }
 
 void EmuWindow::TouchReleased() {
+
+    if (camera_hack_state.grabbed) {
+        camera_hack_state.grabbed = false;
+        return;
+    }
+
     std::lock_guard guard{touch_state->mutex};
+
     touch_state->touch_pressed = false;
     touch_state->touch_x = 0;
     touch_state->touch_y = 0;
 }
 
+static double clamp(double v, double _min, double _max) {
+    return std::min(std::max(v, _min), _max);
+}
+
+static double clampRange(double v, double r) {
+    return clamp(v, -r, r);
+}
+
+static bool isZero(double* v) {
+    return v[0] == 0.0 && v[1] == 0.0 && v[2] == 0.0;
+}
+
+void EmuWindow::UpdateCameraHack() {
+    static std::array<std::unique_ptr<Input::ButtonDevice>, 8> buttons;
+    if (buttons[0] == nullptr) {
+        buttons[0] =
+            Input::CreateDevice<Input::ButtonDevice>(InputCommon::GenerateKeyboardParam(0x57)); // W
+        buttons[1] =
+            Input::CreateDevice<Input::ButtonDevice>(InputCommon::GenerateKeyboardParam(0x41)); // A
+        buttons[2] =
+            Input::CreateDevice<Input::ButtonDevice>(InputCommon::GenerateKeyboardParam(0x53)); // S
+        buttons[3] =
+            Input::CreateDevice<Input::ButtonDevice>(InputCommon::GenerateKeyboardParam(0x44)); // D
+        buttons[4] = Input::CreateDevice<Input::ButtonDevice>(
+            InputCommon::GenerateKeyboardParam(0x01000020)); // Shift
+        buttons[5] =
+            Input::CreateDevice<Input::ButtonDevice>(InputCommon::GenerateKeyboardParam(0x42)); // B
+        buttons[6] =
+            Input::CreateDevice<Input::ButtonDevice>(InputCommon::GenerateKeyboardParam(0x51)); // Q
+        buttons[7] =
+            Input::CreateDevice<Input::ButtonDevice>(InputCommon::GenerateKeyboardParam(0x45)); // E
+    }
+
+    const bool keyW = buttons[0]->GetStatus();
+    const bool keyA = buttons[1]->GetStatus();
+    const bool keyS = buttons[2]->GetStatus();
+    const bool keyD = buttons[3]->GetStatus();
+    const bool isShiftPressed = buttons[4]->GetStatus();
+    const bool keyB = buttons[5]->GetStatus();
+    const bool keyQ = buttons[6]->GetStatus();
+    const bool keyE = buttons[7]->GetStatus();
+
+    float mouseDelta[2] = {};
+    mouseDelta[0] = (camera_hack_state.tx - camera_hack_state.lastX);
+    mouseDelta[1] = (camera_hack_state.ty - camera_hack_state.lastY);
+    camera_hack_state.lastX = camera_hack_state.tx;
+    camera_hack_state.lastY = camera_hack_state.ty;
+
+    const auto keyMoveSpeed = 10.0;
+    const auto keyMoveShiftMult = 5.0;
+    const auto keyMoveVelocityMult = 1.0 / 5.0;
+    const auto keyMoveDrag = 0.8;
+    const auto keyMoveLowSpeedCap = 0.01;
+
+    auto keyMoveMult = 1.0;
+    if (isShiftPressed)
+        keyMoveMult = keyMoveShiftMult;
+
+    const auto keyMoveSpeedCap = keyMoveSpeed * keyMoveMult;
+    const auto keyMoveVelocity = keyMoveSpeedCap * keyMoveVelocityMult;
+
+    auto& keyMovement = fps_camera_controller.keyMovement;
+    if (keyW) {
+        keyMovement[2] = clampRange(keyMovement[2] - keyMoveVelocity, keyMoveSpeedCap);
+    } else if (keyS) {
+        keyMovement[2] = clampRange(keyMovement[2] + keyMoveVelocity, keyMoveSpeedCap);
+    } else {
+        keyMovement[2] *= keyMoveDrag;
+        if (std::abs(keyMovement[2]) < keyMoveLowSpeedCap)
+            keyMovement[2] = 0.0;
+    }
+
+    if (keyA) {
+        keyMovement[0] = clampRange(keyMovement[0] - keyMoveVelocity, keyMoveSpeedCap);
+    } else if (keyD) {
+        keyMovement[0] = clampRange(keyMovement[0] + keyMoveVelocity, keyMoveSpeedCap);
+    } else {
+        keyMovement[0] *= keyMoveDrag;
+        if (std::abs(keyMovement[0]) < keyMoveLowSpeedCap)
+            keyMovement[0] = 0.0;
+    }
+
+    if (keyQ) {
+        keyMovement[1] = clampRange(keyMovement[1] - keyMoveVelocity, keyMoveSpeedCap);
+    } else if (keyE) {
+        keyMovement[1] = clampRange(keyMovement[1] + keyMoveVelocity, keyMoveSpeedCap);
+    } else {
+        keyMovement[1] *= keyMoveDrag;
+        if (std::abs(keyMovement[1]) < keyMoveLowSpeedCap)
+            keyMovement[1] = 0.0;
+    }
+
+    auto& worldMatrix = fps_camera_controller.worldMatrix;
+
+    if (keyB) {
+        Common::mat4_identity(worldMatrix);
+    }
+
+    Common::Vec3 cameraUp{0.0, 0.0, 0.0};
+    cameraUp.x = worldMatrix[1];
+    cameraUp.y = worldMatrix[5];
+    cameraUp.z = worldMatrix[9];
+
+    if (!isZero(keyMovement)) {
+        float finalMovement[3] = {};
+        finalMovement[0] = keyMovement[0];
+        finalMovement[2] = keyMovement[2];
+
+        // Instead of getting the camera up, instead use world up. Feels more natural.
+        finalMovement[0] += cameraUp[0] * keyMovement[1];
+        finalMovement[1] += cameraUp[1] * keyMovement[1];
+        finalMovement[2] += cameraUp[2] * keyMovement[1];
+
+        Common::mat4_translate(worldMatrix, worldMatrix, keyMovement);
+    }
+
+    const auto mouseMoveLowSpeedCap = 0.0001;
+
+    auto& mouseMovement = fps_camera_controller.mouseMovement;
+    mouseMovement[0] += mouseDelta[0] / -500.0;
+    mouseMovement[1] += mouseDelta[1] / -500.0;
+
+    if (!isZero(mouseMovement)) {
+        auto tmp = cameraUp;
+        tmp.Normalize();
+        Common::mat4_rotate(worldMatrix, worldMatrix, mouseMovement[0], tmp.AsArray());
+
+        double worldUp[] = {1.0, 0.0, 0.0};
+        Common::mat4_rotate(worldMatrix, worldMatrix, mouseMovement[1], worldUp);
+    }
+
+    const double mouseLookDrag = 0.0;
+    mouseMovement[0] *= mouseLookDrag;
+    mouseMovement[1] *= mouseLookDrag;
+
+    if (std::abs(mouseMovement[0]) < mouseMoveLowSpeedCap) mouseMovement[0] = 0.0;
+    if (std::abs(mouseMovement[1]) < mouseMoveLowSpeedCap) mouseMovement[1] = 0.0;
+
+    VideoCore::RenderHacksInput input;
+    Common::mat4_inverse(input.view_matrix, worldMatrix);
+    input.disable_fog = fog_disabled;
+
+    VideoCore::g_renderer->SetRenderHacks(input);
+}
+
 void EmuWindow::TouchMoved(unsigned framebuffer_x, unsigned framebuffer_y) {
+    if (camera_hack_state.grabbed) {
+        IsWithinTopScreen(framebuffer_layout, &camera_hack_state.tx, &camera_hack_state.ty,
+                          framebuffer_x, framebuffer_y);
+    }
+
     if (!touch_state->touch_pressed)
         return;
 

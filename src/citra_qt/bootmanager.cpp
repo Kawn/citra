@@ -143,6 +143,7 @@ void OpenGLWindow::Present() {
     context->swapBuffers(this);
     auto f = context->versionFunctions<QOpenGLFunctions_3_3_Core>();
     f->glFinish();
+    UpdateCameraHack();
     QWindow::requestUpdate();
 }
 

@@ -46,10 +46,20 @@ extern Layout::FramebufferLayout g_screenshot_framebuffer_layout;
 
 extern Memory::MemorySystem* g_memory;
 
+
+struct RenderHacksInput {
+    RenderHacksInput() {
+        Common::mat4_identity(view_matrix);
+    }
+
+    double view_matrix[16];
+    bool disable_fog = false;
+};
 enum class ResultStatus {
     Success,
     ErrorGenericDrivers,
     ErrorBelowGL33,
+
 };
 
 /// Initialize the video core

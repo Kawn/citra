@@ -24,6 +24,9 @@ public:
     /// Shutdown the renderer
     virtual void ShutDown() = 0;
 
+
+    virtual void SetRenderHacks(const VideoCore::RenderHacksInput& input) = 0;
+
     /// Finalize rendering the guest frame and draw into the presentation texture
     virtual void SwapBuffers() = 0;
 
@@ -36,6 +39,7 @@ public:
 
     /// Cleans up after video dumping is ended
     virtual void CleanupVideoDumping() = 0;
+
 
     /// Updates the framebuffer layout of the contained render window handle.
     void UpdateCurrentFramebufferLayout(bool is_portrait_mode = {});
